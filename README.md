@@ -4,6 +4,12 @@
 
 Visualize and teleoperate a [tbp.monty](https://github.com/thousandbrainsproject/tbp.monty) experiment in real-time.
 
+> [!NOTE]
+>
+> Originally created by @ramyamounir and submitted https://github.com/thousandbrainsproject/tbp.monty/pull/1016.
+>
+> @tristanls-tbp only converted the tool into the separate repo.
+
 ## Installation
 
 The environment for this project is managed with [conda](https://www.anaconda.com/download/success).
