@@ -1,9 +1,8 @@
 # tbp.teleop
 
-Visualize and teleoperate a [tbp.monty](https://github.com/thousandbrainsproject/tbp.monty) experiment in real-time.
+[![Limited Maintenance](https://img.shields.io/badge/Limited_Maintenance-%E2%9A%A0%EF%B8%8F-red?style=for-the-badge)](#limited-maintenance)
 
-> [!IMPORTANT]
-> This repository receives limited maintenance. It is maintained time-permitting at our own discretion. Issues and pull requests may not receive timely responses, and support or updates are not guaranteed. Community contributions are welcome but may be reviewed infrequently.
+Visualize and teleoperate a [tbp.monty](https://github.com/thousandbrainsproject/tbp.monty) experiment in real-time.
 
 ## Installation
 
@@ -108,3 +107,8 @@ mypy .
 ```bash
 pytest
 ```
+
+## Limited Maintenance
+
+> [!IMPORTANT]
+> This repository receives limited maintenance. It is maintained time-permitting at our own discretion. Issues and pull requests may not receive timely responses, and support or updates are not guaranteed. Community contributions are welcome but may be reviewed infrequently.
