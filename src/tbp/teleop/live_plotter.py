@@ -14,6 +14,9 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 from tbp.monty.frameworks.experiments.mode import ExperimentMode
+from tbp.monty.frameworks.models.no_reset_evidence_matching import (
+    MontyForNoResetEvidenceGraphMatching,
+)
 
 from tbp.teleop.controls import (
     ActionButtons,
@@ -131,6 +134,23 @@ class LivePlotter(Plotter):
             and lm.learning_module_id in self.model.supervised_lm_ids
         )
 
+    @staticmethod
+    def _is_continual(model: Monty) -> bool:
+        """Whether the model carries its hypotheses across episodes.
+
+        No-reset / continual experiments do not reset their hypotheses (and therefore
+        their evidence) between episodes, so their evidence history is plotted as one
+        continuous trajectory. Every other experiment resets per episode and its plot
+        is cleared at each episode boundary.
+
+        Args:
+            model: The Monty model being plotted.
+
+        Returns:
+            True when the model preserves hypotheses across episodes.
+        """
+        return isinstance(model, MontyForNoResetEvidenceGraphMatching)
+
     def initialize(self, model: Monty, supervised_lm_ids: list[str]) -> None:
         """Resolve the displayed LM and build the figure, axes, and widgets.
 
@@ -222,9 +242,16 @@ class LivePlotter(Plotter):
         """
         if self.fig is None:
             return
+        prev_step = self._last_step
         self._last_observations = observations
         self._last_step = step
-        self._history.accumulate(self.model.learning_modules, step)
+        if self._is_continual(self.model):
+            history_step = self.model.total_steps
+        else:
+            if prev_step is None or step <= prev_step:
+                self._history.clear()
+            history_step = step
+        self._history.accumulate(self.model.learning_modules, history_step)
         self._render(observations, step)
         if not self.interactive:
             self._controls.pause()

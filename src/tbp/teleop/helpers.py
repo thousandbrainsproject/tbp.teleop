@@ -349,6 +349,14 @@ class EvidenceHistory:
         self.burst_steps_by_lm: dict[str, list[int]] = {}
         self._last_accumulated_step: int | None = None
 
+    def clear(self) -> None:
+        """Drop all accumulated history so the line plots restart from empty."""
+        self.steps_by_lm.clear()
+        self.evidence_by_lm.clear()
+        self.num_hyp_by_lm.clear()
+        self.burst_steps_by_lm.clear()
+        self._last_accumulated_step = None
+
     def accumulate(self, learning_modules: list[LearningModule], step: int) -> None:
         """Record this step's evidence history for every evidence-supporting LM.
 
@@ -367,8 +375,7 @@ class EvidenceHistory:
                 self._append(lm, step)
 
     def _num_hypotheses_for_each_graph(
-        self: Self,
-        lm: EvidenceGraphLM
+        self: Self, lm: EvidenceGraphLM
     ) -> npt.NDArray[np.float64]:
         """Return the number of hypotheses for each non-empty graph in the LM.
 
