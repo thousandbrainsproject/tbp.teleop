@@ -61,12 +61,25 @@ coverage.xml
 
 # Environments
 .env
+.envrc
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# LLMs
+CLAUDE.md
+AGENTS.md
+.claude/
+.agents/
+.codex/
+.cursor/
+.cursorrules
+.aider*
+.windsurfrules
+.github/copilot-instructions.md
 
 # Tool Caches
 .mypy_cache/
@@ -75,3 +88,6 @@ venv.bak/
 
 # hydra
 outputs/
+
+# symlinks
+src/tbp/monty/
