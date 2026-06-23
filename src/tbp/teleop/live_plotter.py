@@ -82,6 +82,7 @@ class LivePlotter(Plotter):
     def __init__(
         self,
         interactive: bool = False,
+        min_delay: float = 0.001,
         max_delay: float = 2.0,
         figsize: tuple[float, float] = (16, 8),
     ) -> None:
@@ -90,6 +91,7 @@ class LivePlotter(Plotter):
         Args:
             interactive: Whether to render action buttons and override the executed
                 action with the user's choice (otherwise render a speed slider).
+            min_delay: Non-interactive pause in seconds at full speed.
             max_delay: Maximum non-interactive pause in seconds at the slowest speed.
             figsize: Figure size in inches.
         """
@@ -98,6 +100,7 @@ class LivePlotter(Plotter):
         plt.ioff()
 
         self.interactive = interactive
+        self.min_delay = min_delay
         self.max_delay = max_delay
         self.figsize = figsize
 
@@ -142,7 +145,9 @@ class LivePlotter(Plotter):
         self.model = model
         self._channel_view = ChannelView(model)
         self._controls = (
-            ActionButtons(model) if self.interactive else SpeedSlider(self.max_delay)
+            ActionButtons(model)
+            if self.interactive
+            else SpeedSlider(self.min_delay, self.max_delay)
         )
         self._history = EvidenceHistory()
         self._last_observations = None

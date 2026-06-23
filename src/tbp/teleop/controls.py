@@ -341,17 +341,20 @@ class SpeedSlider:
     """The non-interactive stepping control: a speed slider that paces playback.
 
     Renders a `Speed` slider along the bottom of the figure and, after each step,
-    pauses for a duration derived from the slider value: full speed runs without delay,
-    an intermediate value pauses proportionally up to `max_delay`, and zero halts until
-    the slider is moved.
+    pauses for a duration interpolated across `[min_delay, max_delay]`: full speed
+    pauses for `min_delay`, an intermediate value pauses proportionally up to
+    `max_delay`, and zero halts until the slider is moved.
     """
 
-    def __init__(self, max_delay: float) -> None:
+    def __init__(self, min_delay: float, max_delay: float) -> None:
         """Initialize the slider control.
 
         Args:
+            min_delay: Pause in seconds at full speed. Positive so the event loop still
+                runs each step.
             max_delay: Maximum pause in seconds at the slowest non-halting speed.
         """
+        self.min_delay = min_delay
         self.max_delay = max_delay
         self.fig: Figure | None = None
         self._slider: Slider | None = None
@@ -374,24 +377,24 @@ class SpeedSlider:
         if delay is None:
             while float(self._slider.val) <= 0.0:
                 self.fig.canvas.start_event_loop(0.1)
-        elif delay > 0.0:
+        else:
             plt.pause(delay)
 
     def _pause_seconds(self, speed: float) -> float | None:
         """Map a speed slider value in [0, 1] to a pause duration.
 
         Args:
-            speed: The slider value; 1 = no delay, 0 = halt indefinitely.
+            speed: The slider value; 1 = fastest (`min_delay`), 0 = halt indefinitely.
 
         Returns:
-            `None` to halt (speed 0), `0.0` for full speed (speed >= 1), else a
-            positive pause bounded by `max_delay`.
+            `None` to halt (speed 0), else a positive pause interpolated across
+            `[min_delay, max_delay]` (`min_delay` at full speed, `max_delay` as speed
+            approaches 0).
         """
         if speed <= 0.0:
             return None
-        if speed >= 1.0:
-            return 0.0
-        return self.max_delay * (1.0 - speed)
+        speed = min(speed, 1.0)
+        return self.min_delay + (self.max_delay - self.min_delay) * (1.0 - speed)
 
     def close(self) -> None:
         """Drop the slider reference."""
