@@ -74,11 +74,38 @@ After installing the environment, to run an experiment, run:
 python run.py -cd src/tbp/teleop/conf experiment=example
 ```
 
-To run an experiment where episodes are executed in parallel, run:
+
+## Live Plotter
+
+The live plotter visualizes an experiment in real-time. It is attached to an
+experiment as a Monty step hook. Two hooks are provided as a Hydra `hooks` config
+group under `src/tbp/teleop/conf/hooks`:
+
+- `monitor` — watch the experiment as it runs.
+- `interactive` — watch and teleoperate, overriding the agent's action at every step.
+
+Enable a hook by adding it to your experiment's `defaults` list:
+
+```yaml
+# @package _global_
+
+defaults:
+  - /monty: evidencegraph_exp1000_emin_t3_tot2500
+  # ...
+  - /hooks: monitor
+```
+
+Or select one at run time as an inline override. Use `+hooks=` to add the hook
+when the experiment does not already list one in its `defaults`:
 
 ```bash
-python run_parallel.py -cd src/tbp/teleop/conf experiment=example num_parallel=8
+python run.py -cd src/tbp/teleop/conf experiment=example +hooks=interactive
+# OR
+python run.py -cd src/tbp/teleop/conf experiment=example +hooks=monitor
 ```
+
+If the experiment already includes a hook in its `defaults` list, drop the `+` to
+swap it instead (for example, `hooks=interactive`).
 
 ## Development
 
