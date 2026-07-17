@@ -8,7 +8,7 @@
 # https://opensource.org/licenses/MIT.
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from tbp.monty.frameworks.experiments.hooks import StepHook
 from typing_extensions import Self
@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 
 
 class Default(StepHook):
-
     _initialized: bool = False
     _plotter: Plotter
 
@@ -39,6 +38,7 @@ class Default(StepHook):
         step: int,
         observations: Observations,
         actions: list[Action],
+        experiment: Any | None = None,
     ) -> list[Action]:
         """Draw the current state and, if interactive, return the user-chosen action.
 
@@ -53,6 +53,7 @@ class Default(StepHook):
             step: The index of the current step within the episode.
             observations: The observations from the most recent step.
             actions: The actions returned by the model for the next step.
+            experiment: The Monty experiment, if any, that is running this step.
 
         Returns:
             The actions to execute next, unchanged or overridden by the user.
