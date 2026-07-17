@@ -59,10 +59,9 @@ class DefaultExperimentAggregator(ExperimentAggregator):
     the episode is about. Taking it whole means a frame counts a run the same way
     Monty's logs do, rather than offering a second opinion that could disagree.
 
-    Note that only `pretraining_experiments` passes its experiment to a step hook today;
-    `monty_experiment` and `object_recognition_experiments` do not, and a hook has no
-    other way to reach one. Against those, this reports nothing rather than raising,
-    since a run is still perfectly watchable without its counters.
+    A hook reaches its experiment only when the experiment passes itself to the step
+    hook. Against a Monty that does not, `experiment` is `None` and this reports nothing
+    rather than raising, since a run is still perfectly watchable without its counters.
     """
 
     def __call__(self, experiment: MontyExperiment) -> ExperimentFrame:
@@ -77,7 +76,7 @@ class DefaultExperimentAggregator(ExperimentAggregator):
             experiment to ask.
         """
         params = getattr(experiment, "logger_args", {})
-        if "target" in params:
-            primary_target = params.pop("target")
-            params["primary_target"] = primary_target
-        return {key: plain(value) for key, value in params.items()}
+        frame = {key: plain(value) for key, value in params.items()}
+        if "target" in frame:
+            frame["primary_target"] = frame.pop("target")
+        return frame
