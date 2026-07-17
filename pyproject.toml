@@ -16,6 +16,7 @@ dependencies = [
     "tbp.monty", # imported via conda
     "hydra-core>=1.3.2", # Hydra is used for configuring Monty
     "msgpack>=1.0.0", # Frames are encoded for a socket or a file with msgpack
+    "pyzmq>=25.0.0", # Frames are published to, and subscribed from, a ZeroMQ socket
 ]
 description = "Visualize and teleoperate a Monty experiment in real-time "
 dynamic = ["version"]

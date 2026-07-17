@@ -63,6 +63,7 @@ coverage.xml
 .env
 .envrc
 .venv
+.venv-viz/
 env/
 venv/
 ENV/
