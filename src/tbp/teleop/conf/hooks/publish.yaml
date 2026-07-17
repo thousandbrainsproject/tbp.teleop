@@ -1,7 +1,11 @@
 # @package experiment.config.step_hook
 _target_: tbp.teleop.aggregate.Aggregator
 observations:
-  _target_: tbp.teleop.aggregate.SmartObservationAggregator
+  _target_: tbp.teleop.aggregate.observations.SmartObservationAggregator
+actions:
+  _target_: tbp.teleop.aggregate.actions.DefaultActionAggregator
+experiment:
+  _target_: tbp.teleop.aggregate.experiment.DefaultExperimentAggregator
 consumer:
   _target_: tbp.teleop.wire.FramePublisher
   endpoint: tcp://127.0.0.1:5555

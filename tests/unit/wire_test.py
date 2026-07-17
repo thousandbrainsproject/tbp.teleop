@@ -20,10 +20,21 @@ from pathlib import Path
 
 import numpy as np
 
-from tbp.teleop.frame import Frame
-from tbp.teleop.wire import FramePublisher, subscribe
+from tbp.teleop.commands import (
+    Command,
+    CommandOperation,
+    CommandResult,
+    RunMode,
+)
+from tbp.teleop.frames import Frame
+from tbp.teleop.wire import (
+    CommandClient,
+    CommandServer,
+    FramePublisher,
+    subscribe,
+)
 
-STEP = 7
+STEP_INDEX = 7
 RGBA = np.arange(2 * 2 * 4, dtype=np.uint8).reshape(2, 2, 4)
 
 # Generous: it only bounds how long a wedged test may hang, not how long one takes.
@@ -58,7 +69,7 @@ class SubscriptionTest(WireTest):
 
         def publish_until_received() -> None:
             while not stop.is_set():
-                publisher(self.frame_at(STEP))
+                publisher(self.frame_at(STEP_INDEX))
                 time.sleep(0.02)
 
         thread = threading.Thread(target=publish_until_received, daemon=True)
@@ -68,10 +79,10 @@ class SubscriptionTest(WireTest):
 
         frame = next(subscribe(self.endpoint, timeout=CONNECT_TIMEOUT))
 
-        self.assertEqual(frame.step, STEP)
+        self.assertEqual(frame.step, STEP_INDEX)
         self.assertEqual(frame.episode, 0)
         np.testing.assert_array_equal(
-            frame.observations["agent_id_0"]["view_finder"]["rgba"], RGBA + STEP
+            frame.observations["agent_id_0"]["view_finder"]["rgba"], RGBA + STEP_INDEX
         )
 
     def test_a_subscription_gives_up_after_silence(self) -> None:
@@ -113,18 +124,90 @@ class PublisherTest(WireTest):
         self.assertEqual(publisher.frames, 2)
 
 
+class CommandChannelTest(WireTest):
+    def serve_one(self, result: CommandResult) -> dict:
+        # Runs a server in a thread that answers one command with `result`, and
+        # returns a dict the thread fills with the command it received, so a test can
+        # check both ends of the exchange.
+        server = CommandServer(self.endpoint)
+        self.addCleanup(server.close)
+        received: dict = {}
+
+        def serve() -> None:
+            command = server.receive(timeout=CONNECT_TIMEOUT)
+            received["command"] = command
+            if command is not None:
+                server.acknowledge(result)
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join)
+        return received
+
+    def test_a_command_is_received_and_acknowledged(self) -> None:
+        """The driver's command reaches the experiment, and its answer comes back."""
+        received = self.serve_one(
+            CommandResult(run_mode=RunMode.STEP, episode=0, step=3)
+        )
+        client = CommandClient(self.endpoint, timeout=CONNECT_TIMEOUT)
+        self.addCleanup(client.close)
+
+        result = client.send(
+            Command(
+                operation=CommandOperation.SET_RUN_MODE,
+                run_mode=RunMode.STEP,
+                interval=0.5,
+            )
+        )
+
+        self.assertEqual(
+            result, CommandResult(run_mode=RunMode.STEP, episode=0, step=3)
+        )
+        self.assertEqual(received["command"].operation, CommandOperation.SET_RUN_MODE)
+        self.assertEqual(received["command"].interval, 0.5)
+
+    def test_a_server_polls_without_blocking(self) -> None:
+        """With no command waiting, a zero timeout returns at once, not never."""
+        server = CommandServer(self.endpoint)
+        self.addCleanup(server.close)
+
+        self.assertIsNone(server.receive(timeout=0))
+
+    def test_a_client_gives_up_when_the_experiment_is_gone(self) -> None:
+        """A command sent to nobody returns `None`, rather than hanging the driver."""
+        client = CommandClient(self.endpoint, timeout=0.1)
+        self.addCleanup(client.close)
+
+        self.assertIsNone(client.send(Command(operation=CommandOperation.STEP)))
+
+    def test_a_server_survives_being_pickled(self) -> None:
+        """Monty pickles its config every epoch, and a socket cannot be pickled."""
+        server = CommandServer(self.endpoint)
+        self.addCleanup(server.close)
+
+        restored = pickle.loads(pickle.dumps(server))  # noqa: S301
+
+        self.assertEqual(restored.endpoint, self.endpoint)
+
+
 class IsolationTest(unittest.TestCase):
-    def test_subscribing_needs_no_monty(self) -> None:
-        """The far end of the wire is an interpreter Monty could not run on."""
+    def assert_imports_cleanly(self, module: str, name: str) -> None:
         program = (
             "import sys\n"
-            "from tbp.teleop.wire import subscribe\n"
+            f"from {module} import {name}\n"
             "banned = ('tbp.monty', 'torch')\n"
             "leaked = [m for m in sys.modules if m.startswith(banned)]\n"
             "assert not leaked, leaked\n"
         )
-
         subprocess.run([sys.executable, "-c", program], check=True)  # noqa: S603
+
+    def test_subscribing_needs_no_monty(self) -> None:
+        """The far end of the wire is an interpreter Monty could not run on."""
+        self.assert_imports_cleanly("tbp.teleop.wire", "subscribe")
+
+    def test_commanding_needs_no_monty(self) -> None:
+        """A driver commands the experiment without holding any part of it."""
+        self.assert_imports_cleanly("tbp.teleop.wire", "CommandClient")
 
 
 if __name__ == "__main__":

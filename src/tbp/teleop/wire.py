@@ -24,16 +24,27 @@ from typing import TYPE_CHECKING
 
 import zmq
 
-from tbp.teleop.codec import decode, encode
+from tbp.teleop.codec import (
+    decode,
+    decode_command,
+    decode_result,
+    encode,
+    encode_command,
+    encode_result,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from tbp.teleop.frame import Frame
+    from tbp.teleop.commands import Command, CommandResult
+    from tbp.teleop.frames import Frame
 
-# The publisher binds and subscribers connect: the experiment is the long-lived end,
-# and there may be no viewer, one, or several.
+# The experiment binds and the far ends connect: it is the long-lived side, and there
+# may be no viewer, one, or several. Telemetry and control each get their own endpoint,
+# because the two channels want opposite things of ZeroMQ -- telemetry drops and fans
+# out, control is reliable and answered.
 DEFAULT_ENDPOINT = "tcp://127.0.0.1:5555"
+DEFAULT_CONTROL_ENDPOINT = "tcp://127.0.0.1:5556"
 
 # How many frames may queue for a slow subscriber before the oldest are dropped. A
 # frame is a couple of hundred kilobytes, so ZeroMQ's default of a thousand would let
@@ -98,6 +109,136 @@ class FramePublisher:
             The publisher's state, without its socket.
         """
         return {**self.__dict__, "_context": None, "_socket": None}
+
+
+class CommandServer:
+    """The experiment's end of the control channel: receive a command, answer it.
+
+    Binds a reply socket the driver connects to, and speaks only when spoken to, which
+    is all the control channel ever needs: the driver always asks, and the experiment
+    answers where it stands. A command received must be answered with `acknowledge`
+    before the next is received; a receive that times out is answered by nobody, so no
+    reply is owed.
+
+    How long `receive` waits is the caller's to decide, and it is the whole of what
+    separates the modes: block for a command in step mode, poll for one in continuous.
+    """
+
+    def __init__(self, endpoint: str = DEFAULT_CONTROL_ENDPOINT) -> None:
+        """Bind the control socket.
+
+        Args:
+            endpoint: The ZeroMQ endpoint to receive commands on.
+        """
+        self.endpoint = endpoint
+        self.received = 0
+        self._context = zmq.Context()
+        self._socket = self._context.socket(zmq.REP)
+        self._socket.setsockopt(zmq.LINGER, 0)
+        self._socket.bind(endpoint)
+
+    def receive(self, timeout: float | None = None) -> Command | None:
+        """Wait for a command, up to `timeout`.
+
+        Args:
+            timeout: Seconds to wait, `0` to poll without waiting, or `None` to wait
+                until a command arrives.
+
+        Returns:
+            The command, or `None` when the wait ran out first.
+        """
+        # Set per-receive, since the wait is what the mode varies: -1 blocks, 0 polls.
+        self._socket.setsockopt(
+            zmq.RCVTIMEO, -1 if timeout is None else int(timeout * 1000)
+        )
+        try:
+            data = self._socket.recv()
+        except zmq.Again:
+            return None
+        self.received += 1
+        return decode_command(data)
+
+    def acknowledge(self, result: CommandResult) -> None:
+        """Answer the command just received.
+
+        Args:
+            result: Where the run now stands.
+        """
+        self._socket.send(encode_result(result))
+
+    def close(self) -> None:
+        """Close the socket."""
+        self._socket.close()
+        self._context.term()
+
+    def __getstate__(self) -> dict:
+        """Leave the socket out of the pickle Monty takes of its config.
+
+        Monty saves its state at the end of every epoch, the hook lives in that config,
+        and no setting turns it off. A socket cannot be pickled.
+
+        Returns:
+            The server's state, without its socket.
+        """
+        return {**self.__dict__, "_context": None, "_socket": None}
+
+
+class CommandClient:
+    """A driver's end of the control channel: send a command, get an acknowledgement.
+
+    Connects to the experiment's `CommandServer` and speaks first, always. Each command
+    is answered before the next may be sent, so the driver knows every command landed
+    and where the run stands after it.
+
+    The wait for an answer is finite: an experiment that has ended answers nothing, and
+    a driver must not hang for ever on a run that is gone. A timed-out send returns
+    `None`, and the socket is left able to send again rather than wedged.
+    """
+
+    def __init__(
+        self, endpoint: str = DEFAULT_CONTROL_ENDPOINT, timeout: float | None = None
+    ) -> None:
+        """Connect the control socket.
+
+        Args:
+            endpoint: The ZeroMQ endpoint to send commands to.
+            timeout: Seconds to wait for an acknowledgement, or `None` to wait for ever.
+        """
+        self.endpoint = endpoint
+        self._context = zmq.Context()
+        self._socket = self._context.socket(zmq.REQ)
+        # A plain REQ socket is strictly lockstep, so a send that times out leaves it
+        # unable to send again; relaxing that lets the next command go, and correlating
+        # it lets a late answer to an abandoned command be spotted as stale rather than
+        # taken for the answer to this one.
+        self._socket.setsockopt(zmq.REQ_RELAXED, 1)
+        self._socket.setsockopt(zmq.REQ_CORRELATE, 1)
+        self._socket.setsockopt(zmq.LINGER, 0)
+        if timeout is not None:
+            self._socket.setsockopt(zmq.RCVTIMEO, int(timeout * 1000))
+        self._socket.connect(endpoint)
+
+    def send(self, command: Command) -> CommandResult | None:
+        """Send a command and wait for its acknowledgement.
+
+        Args:
+            command: The command to send.
+
+        Returns:
+            Where the run stands after the command, or `None` when the experiment did
+            not answer in time.
+        """
+        self._socket.send(encode_command(command))
+        try:
+            reply = self._socket.recv()
+        except zmq.Again:
+            return None
+        return decode_result(reply)
+
+    def close(self) -> None:
+        """Close the socket."""
+        self._socket.close()
+        self._context.term()
 
 
 def subscribe(

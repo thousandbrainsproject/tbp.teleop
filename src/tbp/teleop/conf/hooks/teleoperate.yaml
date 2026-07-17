@@ -1,0 +1,22 @@
+# @package experiment.config.step_hook
+_target_: tbp.teleop.aggregate.Aggregator
+observations:
+  _target_: tbp.teleop.aggregate.observations.SmartObservationAggregator
+actions:
+  _target_: tbp.teleop.aggregate.actions.DefaultActionAggregator
+experiment:
+  _target_: tbp.teleop.aggregate.experiment.DefaultExperimentAggregator
+consumer:
+  _target_: tbp.teleop.frame.Broadcast
+  consumers:
+    - _target_: tbp.teleop.wire.FramePublisher
+      endpoint: tcp://127.0.0.1:5555
+    - _target_: tbp.teleop.recording.FrameWriter
+      save_path: run.frames
+teleoperator:
+  _target_: tbp.teleop.control.Teleoperator
+  mode: step
+  interval: 0.0
+  server:
+    _target_: tbp.teleop.wire.CommandServer
+    endpoint: tcp://127.0.0.1:5556
