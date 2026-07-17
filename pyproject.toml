@@ -15,6 +15,7 @@ classifiers = [
 dependencies = [
     "tbp.monty", # imported via conda
     "hydra-core>=1.3.2", # Hydra is used for configuring Monty
+    "msgpack>=1.0.0", # Frames are encoded for a socket or a file with msgpack
 ]
 description = "Visualize and teleoperate a Monty experiment in real-time "
 dynamic = ["version"]
@@ -110,8 +111,10 @@ ignore = [
 # D100: Missing docstring in public module
 # D101: Missing docstring in public class
 # D102: Missing docstring in public method
+# PT009: Use a regular `assert` instead of unittest-style `assertEqual`
+# PT027: Use `pytest.raises` instead of unittest-style `assertRaises`
 # S101: Use of `assert` detected
-"tests/**.py" = ["D100", "D101", "D102", "S101"]
+"tests/**.py" = ["D100", "D101", "D102", "PT009", "PT027", "S101"]
 
 [tool.ruff.lint.flake8-copyright]
 author = "Thousand Brains Project"

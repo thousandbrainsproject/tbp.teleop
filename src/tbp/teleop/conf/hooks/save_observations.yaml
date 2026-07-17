@@ -1,0 +1,7 @@
+# @package experiment.config.step_hook
+_target_: tbp.teleop.aggregate.Aggregator
+observations:
+  _target_: tbp.teleop.aggregate.SmartObservationAggregator
+consumer:
+  _target_: tbp.teleop.consumers.ObservationSaver
+  save_path: observations

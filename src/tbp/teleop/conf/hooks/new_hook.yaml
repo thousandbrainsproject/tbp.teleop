@@ -1,0 +1,4 @@
+# @package experiment.config.step_hook
+_target_: tbp.teleop.aggregate.Aggregator
+consumer:
+  _target_: tbp.teleop.frame.NoOpFrameConsumer
