@@ -23,11 +23,11 @@ import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 
-from tbp.teleop.frame import FrameConsumer
+from tbp.teleop.frames import FrameConsumer
 from tbp.teleop.recording import LOCAL_DIR
 
 if TYPE_CHECKING:
-    from tbp.teleop.frame import Frame
+    from tbp.teleop.frames import Frame
 
 
 class ObservationSaver(FrameConsumer):

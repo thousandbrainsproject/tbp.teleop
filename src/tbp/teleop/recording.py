@@ -21,12 +21,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from tbp.teleop.codec import decode, encode
+from tbp.teleop.frames import FrameConsumer
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from typing import BinaryIO
 
-    from tbp.teleop.frame import Frame
+    from tbp.teleop.frames import Frame
 
 # The repo's gitignored scratch directory. Resolved from this file rather than the
 # working directory because Hydra chdirs into its own output directory for a run.
@@ -99,7 +100,7 @@ def read_frames(path: Path | str) -> Iterator[Frame]:
             yield decode(payload)
 
 
-class FrameWriter:
+class FrameWriter(FrameConsumer):
     """A `FrameConsumer` that records every frame it is handed to a file.
 
     The stream is buffered rather than flushed per frame, so `close` is what commits

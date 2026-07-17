@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-from tbp.teleop.frame import Frame
+from tbp.teleop.frames import Frame
 from tbp.teleop.recording import FrameWriter, TruncatedRecordingError, read_frames
 
 FRAME_COUNT = 3
