@@ -26,10 +26,11 @@ from tbp.teleop.codec import (
     encode_result,
 )
 from tbp.teleop.commands import (
-    Command,
-    CommandOperation,
     CommandResult,
+    QuitCommand,
     RunMode,
+    SetRunModeCommand,
+    StepCommand,
 )
 from tbp.teleop.frames import Frame
 
@@ -182,33 +183,37 @@ class UnsupportedTypeTest(CodecTest):
 
 class CommandTest(unittest.TestCase):
     def test_round_trips_a_step_with_a_goal(self) -> None:
-        command = Command(
-            operation=CommandOperation.STEP,
-            goal={"location": [0.0, 1.5, 0.0], "sender_type": "SM"},
+        command = StepCommand(
+            goals=[{"location": [0.0, 1.5, 0.0], "sender_type": "SM"}]
         )
 
         assert decode_command(encode_command(command)) == command
 
-    def test_round_trips_a_switch_mode(self) -> None:
-        command = Command(
-            operation=CommandOperation.SET_RUN_MODE,
-            run_mode=RunMode.CONTINUOUS,
-            interval=0.5,
+    def test_each_command_comes_back_as_its_own_class(self) -> None:
+        """The operation is a `ClassVar`, so the codec carries it to pick the class."""
+        for command in (
+            StepCommand(actions=[]),
+            SetRunModeCommand(run_mode=RunMode.CONTINUOUS, interval=0.5),
+            QuitCommand(),
+        ):
+            with self.subTest(command=type(command).__name__):
+                decoded = decode_command(encode_command(command))
+                self.assertIs(type(decoded), type(command))
+                self.assertEqual(decoded, command)
+
+    def test_an_unknown_operation_is_refused(self) -> None:
+        """A reader that cannot know which command it is must not guess."""
+        data = msgpack.packb(
+            {"version": VERSION, "command": {"operation": "DANCE"}},
+            use_bin_type=True,
         )
 
-        assert decode_command(encode_command(command)) == command
-
-    def test_round_trips_a_bare_operation(self) -> None:
-        assert decode_command(
-            encode_command(Command(operation=CommandOperation.QUIT))
-        ) == Command(operation=CommandOperation.QUIT)
+        with self.assertRaises(UnexpectedMessageError):
+            decode_command(data)
 
     def test_a_command_is_tiny(self) -> None:
         """The control channel carries intents, not arrays: a few small fields."""
-        assert (
-            len(encode_command(Command(operation=CommandOperation.STEP)))
-            < CONTROL_BYTES
-        )
+        assert len(encode_command(StepCommand())) < CONTROL_BYTES
 
     def test_a_frame_is_refused_where_a_command_was_expected(self) -> None:
         """The kinds share a codec, so a reader must not take one for another."""
@@ -217,7 +222,7 @@ class CommandTest(unittest.TestCase):
 
     def test_a_command_is_refused_where_a_frame_was_expected(self) -> None:
         with self.assertRaises(UnexpectedMessageError):
-            decode(encode_command(Command(operation=CommandOperation.STEP)))
+            decode(encode_command(StepCommand()))
 
 
 class CommandResultTest(unittest.TestCase):
@@ -233,7 +238,7 @@ class CommandResultTest(unittest.TestCase):
 
     def test_a_command_and_a_result_are_not_confused(self) -> None:
         with self.assertRaises(UnexpectedMessageError):
-            decode_result(encode_command(Command(operation=CommandOperation.STEP)))
+            decode_result(encode_command(StepCommand()))
         with self.assertRaises(UnexpectedMessageError):
             decode_command(encode_result(CommandResult(run_mode=RunMode.STEP)))
 

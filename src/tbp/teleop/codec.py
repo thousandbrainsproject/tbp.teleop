@@ -11,13 +11,16 @@
 from __future__ import annotations
 
 from dataclasses import fields
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import msgpack
 import numpy as np
 
-from tbp.teleop.commands import Command, CommandResult
+from tbp.teleop.commands import COMMANDS, CommandResult
 from tbp.teleop.frames import Frame
+
+if TYPE_CHECKING:
+    from tbp.teleop.commands import Command
 
 # Bumped whenever the encoded shape changes. A reader refuses a version it does not
 # know rather than silently misreading it.
@@ -50,7 +53,7 @@ def encode(frame: Frame) -> bytes:
     Returns:
         The encoded frame.
     """
-    return _encode("frame", frame)
+    return _encode("frame", _fields(frame))
 
 
 def decode(data: bytes) -> Frame:
@@ -76,29 +79,45 @@ def decode(data: bytes) -> Frame:
 def encode_command(command: Command) -> bytes:
     """Encode a driver's command, for the control channel.
 
+    Every command's `operation` is a `ClassVar`, so it is not among the fields, and is
+    written in alongside them, so that `decode_command` can tell which command class to
+    rebuild.
+
     Args:
         command: The command to encode.
 
     Returns:
         The encoded command.
     """
-    return _encode("command", command)
+    return _encode("command", {**_fields(command), "operation": command.operation})
 
 
 def decode_command(data: bytes) -> Command:
     """Decode a command encoded by `encode_command`.
 
-    Raises `UnsupportedVersionError` when `data` came from a different codec version,
-    and `UnexpectedMessageError` when it is not a command at all. Both come out of
-    `_decode`, so they are named here rather than in a `Raises:` section.
+    The `operation` picks which command class to rebuild; it is not a field of any of
+    them, so it is taken back out before the rest become the command's own arguments.
+
+    `UnsupportedVersionError` (a different codec version) and one form of
+    `UnexpectedMessageError` (not a command at all) come out of `_decode`; the other
+    form, an operation this codec does not know, is raised here.
 
     Args:
         data: The encoded command.
 
     Returns:
         The decoded command.
+
+    Raises:
+        UnexpectedMessageError: When the message names an unknown operation.
     """
-    return Command(**_decode("command", data))
+    body = _decode("command", data)
+    operation = body.pop("operation", None)
+    command = COMMANDS.get(operation)
+    if command is None:
+        msg = f"A command names an unknown operation {operation!r}."
+        raise UnexpectedMessageError(msg)
+    return command(**body)
 
 
 def encode_result(result: CommandResult) -> bytes:
@@ -110,7 +129,7 @@ def encode_result(result: CommandResult) -> bytes:
     Returns:
         The encoded result.
     """
-    return _encode("result", result)
+    return _encode("result", _fields(result))
 
 
 def decode_result(data: bytes) -> CommandResult:
@@ -129,25 +148,36 @@ def decode_result(data: bytes) -> CommandResult:
     return CommandResult(**_decode("result", data))
 
 
-def _encode(kind: str, message: Any) -> bytes:  # noqa: ANN401
-    """Encode a dataclass message under its kind.
+def _fields(message: Any) -> dict:  # noqa: ANN401
+    """Read a dataclass's fields shallowly.
+
+    `dataclasses.asdict` deep-copies every value it walks, which would copy every array
+    on its way out; this reads the top level and leaves the arrays shared. `ClassVar`s
+    like a command's `operation` are not fields, so they are not read here.
+
+    Args:
+        message: The dataclass to read.
+
+    Returns:
+        The dataclass's fields, by name.
+    """
+    return {field.name: getattr(message, field.name) for field in fields(message)}
+
+
+def _encode(kind: str, body: dict) -> bytes:
+    """Encode a message body under its kind.
 
     The kind names the message inside the envelope, so a reader can tell a frame from a
-    choice, and refuse one when it asked for the other.
+    command, and refuse one when it asked for the other.
 
     Args:
         kind: What sort of message this is.
-        message: The dataclass to encode.
+        body: The message's contents.
 
     Returns:
         The encoded message.
     """
-    envelope = {
-        "version": VERSION,
-        # Read the fields shallowly: `dataclasses.asdict` deep-copies every value it
-        # walks, which would copy every array on its way out.
-        kind: {field.name: getattr(message, field.name) for field in fields(message)},
-    }
+    envelope = {"version": VERSION, kind: body}
     return msgpack.packb(envelope, default=_pack_unsupported, use_bin_type=True)
 
 

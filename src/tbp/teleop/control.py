@@ -53,6 +53,27 @@ POLL = 0.25
 _ACTIONS = ActionJSONDecoder()
 
 
+def _pose(features: dict | None) -> dict | None:
+    """Restore a goal's pose to the arrays Monty's `Goal` validates.
+
+    A wire flattens everything to lists, but `Goal` insists `pose_vectors` be an array
+    -- it reads its `.shape` -- so it is put back before Monty ever sees it. A goal
+    without a pose (a look-at) is left alone.
+
+    Args:
+        features: The goal's morphological features, or `None`.
+
+    Returns:
+        The features with `pose_vectors` as an array, or `None`.
+    """
+    if not features or "pose_vectors" not in features:
+        return features
+    return {
+        **features,
+        "pose_vectors": np.asarray(features["pose_vectors"], dtype=float),
+    }
+
+
 class Teleoperator:
     """Runs the experiment at a driver's command, in one of two modes.
 
@@ -269,13 +290,13 @@ class Teleoperator:
             actions: The actions the model computed for this step.
 
         Returns:
-            The driver's spelled-out actions, the motor system's answer to a goal, or
+            The driver's spelled-out actions, the motor system's answer to the goals, or
             the model's own actions when the command named neither.
         """
         if command.actions:
             return [self._rebuild(action) for action in command.actions]
-        if command.goal:
-            return self._pursue(ctx, monty, observations, command.goal)
+        if command.goals:
+            return self._pursue(ctx, monty, observations, command.goals)
         return actions
 
     def _status(self, frame: Frame, *, stopped: bool = False) -> CommandResult:
@@ -300,45 +321,72 @@ class Teleoperator:
         ctx: RuntimeContext,
         monty: Monty,
         observations: Observations,
-        goal: GoalFrame,
+        goals: list[GoalFrame],
     ) -> list[Action]:
-        """Hand the motor system a goal, and run it again to see what it makes of it.
+        """Hand the motor system the driver's goals, and run it again for its answer.
 
         A goal is not something a step hook can answer with, because by the time the
         hook is called the motor system has already run and produced the actions being
-        overridden. So it is run a second time, with the driver's goal in place of the
+        overridden. So it is run a second time, with the driver's goals in place of the
         model's own.
 
         This is not free. The motor system appends to its action sequence on every call,
         so a driven step leaves two entries: the actions the model proposed, and the
-        actions the goal produced. Only the second is ever executed, so the first is
+        actions the goals produced. Only the second is ever executed, so the first is
         dropped here rather than left to misreport the run to everything that reads the
         sequence afterwards. Surface policies also append to their telemetry, which is
         left doubled; nothing reads it yet, and reaching further into the motor system's
         privates to tidy it would cost more than it is worth.
 
         The proper fix is a seam between Monty proposing goals and its motor system
-        acting on them, where a driver's goal would simply join the model's own and the
+        acting on them, where a driver's goals would simply join the model's own and the
         motor system would run once. That is a change to Monty, not to this.
 
         Args:
             ctx: The runtime context.
             monty: The Monty model being driven.
             observations: The observations from this step.
+            goals: The places the driver wants reached.
+
+        Returns:
+            Whatever the motor system decided the goals are worth doing about, which may
+            be nothing at all.
+        """
+        pursued = [self._goal(goal) for goal in goals]
+
+        # The goals are passed straight in, so Monty's own `_goals` is left alone: it is
+        # only read by the step it has already taken.
+        actions = monty.motor_system(
+            ctx,
+            observations,
+            monty.motor_system.action_sequence[-1][1],
+            monty.sensor_module_outputs[0],
+            pursued,
+        )
+        del monty.motor_system._action_sequence[-2]  # noqa: SLF001
+        return actions
+
+    @staticmethod
+    def _goal(goal: GoalFrame) -> Goal:
+        """Build Monty's own `Goal` from the driver's, as it wants it.
+
+        A `GoalFrame` mirrors Monty's `Goal`, so its parts are handed straight over. The
+        sender picks what the motor system does about the goal rather than attributing
+        it: a GSG's goal is jumped to, an SM's is looked at. A jump needs a pose to
+        face, which the driver supplies in `morphological_features`; a look-at, the
+        default, needs only the place.
+
+        Args:
             goal: The place the driver wants reached.
 
         Returns:
-            Whatever the motor system decided the goal is worth doing about, which may
-            be nothing at all.
+            Monty's own goal.
         """
-        # A `GoalFrame` mirrors Monty's own `Goal`, so its parts are handed straight to
-        # one. The sender picks what the motor system does about the goal, rather than
-        # attributing it: a GSG's goal is jumped to, an SM's is looked at. A jump needs
-        # a pose to face, which the driver supplies in `morphological_features`; a
-        # look-at, the default, needs only the place.
-        pursued = Goal(
+        return Goal(
             location=np.asarray(goal["location"], dtype=float),
-            morphological_features=goal.get("morphological_features"),
+            # The wire flattens the pose to lists, but Monty's `Goal` wants its
+            # `pose_vectors` as an array, so they are put back before it sees them.
+            morphological_features=_pose(goal.get("morphological_features")),
             non_morphological_features=goal.get("non_morphological_features"),
             # Monty acts on the most confident goal it holds, so this competes with the
             # model's own goal state generators rather than silencing them.
@@ -348,18 +396,6 @@ class Teleoperator:
             sender_type=goal.get("sender_type", Pursue.LOOK_AT),
             goal_tolerances=None,
         )
-
-        # The goals are passed straight in, so Monty's own `_goals` is left alone: it is
-        # only read by the step it has already taken.
-        actions = monty.motor_system(
-            ctx,
-            observations,
-            monty.motor_system.action_sequence[-1][1],
-            monty.sensor_module_outputs[0],
-            [pursued],
-        )
-        del monty.motor_system._action_sequence[-2]  # noqa: SLF001
-        return actions
 
     @staticmethod
     def _rebuild(action: ActionFrame) -> Action:

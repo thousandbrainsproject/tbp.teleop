@@ -24,11 +24,19 @@ tolerates. It sends a structured command and prints where the run stands after i
 from __future__ import annotations
 
 import argparse
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from tbp.teleop.commands import Command, CommandOperation, RunMode
+from tbp.teleop.commands import (
+    QuitCommand,
+    RunMode,
+    SetRunModeCommand,
+    StepCommand,
+)
 from tbp.teleop.frames import ActionFrame, GoalFrame, Pursue
 from tbp.teleop.wire import DEFAULT_CONTROL_ENDPOINT, CommandClient
+
+if TYPE_CHECKING:
+    from tbp.teleop.commands import Command
 
 # Long enough for the experiment to reach its hook between steps, even while habitat is
 # rendering, but finite: when a run ends it stops answering, and the driver must notice
@@ -164,14 +172,14 @@ def step_command(args: argparse.Namespace) -> Command:
         action = ActionFrame(
             action_name=args.action, agent_id=AGENT, params=parse_params(args.param)
         )
-        return Command(operation=CommandOperation.STEP, actions=[action])
+        return StepCommand(actions=[action])
     if args.goal:
         goal = GoalFrame(
             location=_vector(args.goal),
             sender_type=args.sender_type,
         )
-        return Command(operation=CommandOperation.STEP, goal=goal)
-    return Command(operation=CommandOperation.STEP)
+        return StepCommand(goals=[goal])
+    return StepCommand()
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -198,17 +206,13 @@ def _run_once(client: CommandClient, args: argparse.Namespace) -> None:
         client: The control channel.
         args: The parsed command line.
     """
-    command = {
+    command: Command = {
         "step": lambda: step_command(args),
-        "continuous": lambda: Command(
-            operation=CommandOperation.SET_RUN_MODE,
-            run_mode=RunMode.CONTINUOUS,
-            interval=args.interval,
+        "continuous": lambda: SetRunModeCommand(
+            run_mode=RunMode.CONTINUOUS, interval=args.interval
         ),
-        "stepmode": lambda: Command(
-            operation=CommandOperation.SET_RUN_MODE, run_mode=RunMode.STEP
-        ),
-        "quit": lambda: Command(operation=CommandOperation.QUIT),
+        "stepmode": lambda: SetRunModeCommand(run_mode=RunMode.STEP),
+        "quit": QuitCommand,
     }[args.command]()
 
     result = client.send(command)
@@ -224,7 +228,7 @@ def _run_auto(client: CommandClient, steps: int | None) -> None:
     """
     taken = 0
     while steps is None or taken < steps:
-        result = client.send(Command(operation=CommandOperation.STEP))
+        result = client.send(StepCommand())
         if result is None:
             print("the experiment stopped answering")  # noqa: T201
             return

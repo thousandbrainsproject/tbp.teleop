@@ -10,18 +10,22 @@
 from __future__ import annotations
 
 import unittest
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from tbp.teleop.commands import (
-    Command,
-    CommandOperation,
     CommandResult,
+    QuitCommand,
     RunMode,
+    SetRunModeCommand,
+    StepCommand,
 )
 from tbp.teleop.control import Teleoperator
 from tbp.teleop.frames import Frame, Pursue
+
+if TYPE_CHECKING:
+    from tbp.teleop.commands import Command
 
 
 class FakeMotorSystem:
@@ -115,15 +119,14 @@ class TeleoperatorTest(unittest.TestCase):
 class StepModeTest(TeleoperatorTest):
     def test_a_bare_step_advances_with_the_models_own_actions(self) -> None:
         """Step mode waits, then runs what the model computed when told to step."""
-        actions, server, _ = self.advance([Command(operation=CommandOperation.STEP)])
+        actions, server, _ = self.advance([StepCommand()])
 
         self.assertEqual(actions, ["proposed"])
         self.assertEqual(server.acknowledged[0].run_mode, RunMode.STEP)
         self.assertEqual(server.acknowledged[0].step, 7)
 
     def test_a_step_runs_the_drivers_spelled_out_actions(self) -> None:
-        command = Command(
-            operation=CommandOperation.STEP,
+        command = StepCommand(
             actions=[
                 {
                     "action_name": "turn_left",
@@ -140,15 +143,13 @@ class StepModeTest(TeleoperatorTest):
 
     def test_it_keeps_waiting_past_a_poll_that_finds_nothing(self) -> None:
         """A quiet poll is no instruction; the step blocks until a real one comes."""
-        actions, server, _ = self.advance(
-            [None, None, Command(operation=CommandOperation.STEP)]
-        )
+        actions, server, _ = self.advance([None, None, StepCommand()])
 
         self.assertEqual(actions, ["proposed"])
         self.assertEqual(len(server.acknowledged), 1)
 
     def test_quitting_times_the_model_out_and_stops(self) -> None:
-        server = FakeServer([Command(operation=CommandOperation.QUIT)])
+        server = FakeServer([QuitCommand()])
         monty = FakeMonty()
         teleoperator = Teleoperator(server, mode=RunMode.STEP)
 
@@ -162,9 +163,7 @@ class StepModeTest(TeleoperatorTest):
 class GoalTest(TeleoperatorTest):
     def test_a_goal_is_handed_to_the_motor_system_to_work_out(self) -> None:
         """A goal names a place; the motor system decides how to get there."""
-        command = Command(
-            operation=CommandOperation.STEP, goal={"location": [0.1, 1.5, 0.2]}
-        )
+        command = StepCommand(goals=[{"location": [0.1, 1.5, 0.2]}])
 
         actions, _, monty = self.advance([command])
 
@@ -176,9 +175,8 @@ class GoalTest(TeleoperatorTest):
         """Monty reads a goal's sender to pick jumping there over looking at it."""
         for sender, expected in ((Pursue.JUMP_TO, "GSG"), (Pursue.LOOK_AT, "SM")):
             with self.subTest(sender=sender):
-                command = Command(
-                    operation=CommandOperation.STEP,
-                    goal={"location": [0.0, 0.0, 0.0], "sender_type": sender},
+                command = StepCommand(
+                    goals=[{"location": [0.0, 0.0, 0.0], "sender_type": sender}]
                 )
 
                 _, _, monty = self.advance([command])
@@ -186,36 +184,38 @@ class GoalTest(TeleoperatorTest):
                 [goals] = monty.motor_system.goals
                 self.assertEqual(goals[0].sender_type, expected)
 
-    def test_a_goals_own_features_reach_the_motor_system(self) -> None:
-        """A jump carries the pose it wants; a `GoalFrame` mirrors Monty's `Goal`."""
-        # Monty's `Goal` validates a pose, so the driver's features are handed to it as
-        # it wants them -- `pose_vectors` an `(3, 3)` array or all NaN, alongside
-        # `pose_fully_defined` and `on_object` -- not as the lists a wire delivers.
-        pose = {
-            "pose_vectors": np.full((3, 3), np.nan),
-            "pose_fully_defined": None,
-            "on_object": 1,
-        }
-        command = Command(
-            operation=CommandOperation.STEP,
-            goal={
-                "location": [0.0, 0.0, 0.0],
-                "sender_type": Pursue.JUMP_TO,
-                "morphological_features": pose,
-            },
+    def test_a_goals_pose_is_restored_to_the_array_monty_wants(self) -> None:
+        """The wire flattens a pose to lists; Monty's `Goal` reads `pose_vectors.shape`.
+
+        So the pose is put back to an array before Monty sees it -- the difference
+        between a jump-to goal working over the wire and crashing in the motor system.
+        """
+        command = StepCommand(
+            goals=[
+                {
+                    "location": [0.0, 0.0, 0.0],
+                    "sender_type": Pursue.JUMP_TO,
+                    "morphological_features": {
+                        # As a wire delivers it: plain nested lists, not an array.
+                        "pose_vectors": [[0.0, 0.0, -1.0], [0.0, 0.0, 0.0], [0, 0, 0]],
+                        "pose_fully_defined": None,
+                        "on_object": 1,
+                    },
+                }
+            ]
         )
 
         actions, _, monty = self.advance([command])
 
         self.assertEqual(actions, ["pursued"])
         [goals] = monty.motor_system.goals
-        self.assertIs(goals[0].morphological_features, pose)
+        vectors = goals[0].morphological_features["pose_vectors"]
+        self.assertIsInstance(vectors, np.ndarray)
+        self.assertEqual(vectors.shape, (3, 3))
 
     def test_the_step_leaves_one_entry_in_the_action_sequence(self) -> None:
         """Running the motor system twice would else record a step that never ran."""
-        command = Command(
-            operation=CommandOperation.STEP, goal={"location": [0.0, 0.0, 0.0]}
-        )
+        command = StepCommand(goals=[{"location": [0.0, 0.0, 0.0]}])
 
         _, _, monty = self.advance([command])
 
@@ -226,9 +226,7 @@ class GoalTest(TeleoperatorTest):
 class SwitchModeTest(TeleoperatorTest):
     def test_switching_to_continuous_begins_running(self) -> None:
         """From step mode, switching to continuous advances this step at once."""
-        command = Command(
-            operation=CommandOperation.SET_RUN_MODE, run_mode=RunMode.CONTINUOUS
-        )
+        command = SetRunModeCommand(run_mode=RunMode.CONTINUOUS)
 
         actions, server, _ = self.advance([command])
 
@@ -244,8 +242,7 @@ class SwitchModeTest(TeleoperatorTest):
 
     def test_continuous_obeys_a_command_that_arrives(self) -> None:
         """A step's actions can be injected while the experiment flows."""
-        command = Command(
-            operation=CommandOperation.STEP,
+        command = StepCommand(
             actions=[
                 {
                     "action_name": "move_forward",
@@ -263,8 +260,8 @@ class SwitchModeTest(TeleoperatorTest):
         """A switch to step mode drops into the wait, and the next command advances."""
         actions, server, _ = self.advance(
             [
-                Command(operation=CommandOperation.SET_RUN_MODE, run_mode=RunMode.STEP),
-                Command(operation=CommandOperation.STEP),
+                SetRunModeCommand(run_mode=RunMode.STEP),
+                StepCommand(),
             ],
             mode=RunMode.CONTINUOUS,
         )

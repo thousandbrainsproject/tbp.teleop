@@ -21,10 +21,11 @@ from pathlib import Path
 import numpy as np
 
 from tbp.teleop.commands import (
-    Command,
     CommandOperation,
     CommandResult,
     RunMode,
+    SetRunModeCommand,
+    StepCommand,
 )
 from tbp.teleop.frames import Frame
 from tbp.teleop.wire import (
@@ -152,13 +153,7 @@ class CommandChannelTest(WireTest):
         client = CommandClient(self.endpoint, timeout=CONNECT_TIMEOUT)
         self.addCleanup(client.close)
 
-        result = client.send(
-            Command(
-                operation=CommandOperation.SET_RUN_MODE,
-                run_mode=RunMode.STEP,
-                interval=0.5,
-            )
-        )
+        result = client.send(SetRunModeCommand(run_mode=RunMode.STEP, interval=0.5))
 
         self.assertEqual(
             result, CommandResult(run_mode=RunMode.STEP, episode=0, step=3)
@@ -178,7 +173,7 @@ class CommandChannelTest(WireTest):
         client = CommandClient(self.endpoint, timeout=0.1)
         self.addCleanup(client.close)
 
-        self.assertIsNone(client.send(Command(operation=CommandOperation.STEP)))
+        self.assertIsNone(client.send(StepCommand()))
 
     def test_a_server_survives_being_pickled(self) -> None:
         """Monty pickles its config every epoch, and a socket cannot be pickled."""
