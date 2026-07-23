@@ -131,7 +131,7 @@ class LivePlotter(Plotter):
             return True
         return (
             self.model.experiment_mode is ExperimentMode.TRAIN
-            and lm.learning_module_id in self.model.supervised_lm_ids
+            and lm.learning_module_id in self._supervised_lm_ids
         )
 
     @staticmethod
