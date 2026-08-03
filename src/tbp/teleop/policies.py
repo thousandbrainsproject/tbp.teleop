@@ -14,8 +14,10 @@ import quaternion as qt
 from tbp.monty.frameworks.actions.actions import MoveTangentially
 from tbp.monty.frameworks.models.motor_policies import (
     BasePolicy,
+    InformedPolicy,
     InformedPolicyRandomWalk,
     SurfacePolicy,
+    fixme_undo_last_action,
 )
 from tbp.monty.frameworks.models.motor_policy_selectors import (
     DistantPolicySelector,
@@ -49,6 +51,11 @@ class InteractivePolicy(Protocol):
     tangential surface move for the surface agent. The wrapped policy's automatic
     per-step corrections still run and are never overridden. The surface policy, for
     instance, keeps orienting the sensor and moving forward to touch the object.
+
+    Because the user's choice replaces the action the wrapped policy proposed, the
+    policy is left believing it took an action the environment never executed. The
+    chosen action is fed back through `feedback` so that whatever the policy retrieves
+    from its own last action, e.g., when undoing an action, stays true.
     """
 
     def awaits_choice(self, proposed: list[Action]) -> bool:
@@ -83,6 +90,17 @@ class InteractivePolicy(Protocol):
         """
         ...
 
+    def feedback(self, chosen: list[Action]) -> None:
+        """Tell the wrapped policy which action is actually being executed.
+
+        Called after the user's choice replaces the policy's own proposal, so the
+        policy's record of its last action matches what the environment receives.
+
+        Args:
+            chosen: The actions returned by `compute` that will be executed.
+        """
+        ...
+
 
 class SampledInteractivePolicy:
     """Interactive adapter for sampler-driven policies (distant, informed, base).
@@ -109,6 +127,7 @@ class SampledInteractivePolicy:
         Args:
             policy: The wrapped policy exposing an action sampler and agent id.
         """
+        self._policy = policy
         self._sampler = policy.action_sampler
         self._agent_id = policy.agent_id
 
@@ -126,6 +145,11 @@ class SampledInteractivePolicy:
         action = sample(self._agent_id, ctx.rng)
         action.rotation_degrees = self.DEFAULT_ROTATION_DEGREES * scale
         return [action]
+
+    def feedback(self, chosen: list[Action]) -> None:
+        if not isinstance(self._policy, (InformedPolicy, InformedPolicyRandomWalk)):
+            return
+        self._policy._undo_action = fixme_undo_last_action(chosen[-1])
 
 
 class SurfaceInteractivePolicy:
@@ -176,6 +200,9 @@ class SurfaceInteractivePolicy:
         )
         action.distance = self.DEFAULT_DISTANCE * scale
         return [action]
+
+    def feedback(self, chosen: list[Action]) -> None:
+        pass
 
 
 def interactive_policy_for(model: Monty) -> InteractivePolicy:
