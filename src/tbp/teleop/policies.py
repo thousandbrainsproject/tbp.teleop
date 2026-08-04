@@ -54,8 +54,10 @@ class InteractivePolicy(Protocol):
 
     Because the user's choice replaces the action the wrapped policy proposed, the
     policy is left believing it took an action the environment never executed. The
-    chosen action is fed back through `feedback` so that whatever the policy retrieves
-    from its own last action, e.g., when undoing an action, stays true.
+    chosen action is fed back through `feedback` so that whatever the policy derives
+    from its own last action, e.g., when undoing an action, stays true. The `feedback`
+    implementation is different per policy, and for some policies, e.g., surface policy,
+    it is nothing at all, so each adapter documents what its own `feedback` does.
     """
 
     def awaits_choice(self, proposed: list[Action]) -> bool:
@@ -93,8 +95,11 @@ class InteractivePolicy(Protocol):
     def feedback(self, chosen: list[Action]) -> None:
         """Tell the wrapped policy which action is actually being executed.
 
-        Called after the user's choice replaces the policy's own proposal, so the
-        policy's record of its last action matches what the environment receives.
+        Called after the user's choice replaces the policy's own proposal, so that
+        whatever the policy derives from its last action is derived from the action
+        the environment actually received. Note that policies do not necessarily keep
+        the last action itself, so an implementation may have to update a derived
+        value instead, or may have nothing to update at all.
 
         Args:
             chosen: The actions returned by `compute` that will be executed.
@@ -147,6 +152,17 @@ class SampledInteractivePolicy:
         return [action]
 
     def feedback(self, chosen: list[Action]) -> None:
+        """Point the wrapped policy's undo at the user's action.
+
+        The informed policies never keep their last action around, so there is no
+        `last_action` to assign to. What they keep instead is `_undo_action`: the
+        already-inverted action they will take to step back on to the object the next
+        time they find themselves off it. So the equivalent of recording the last
+        action is to store its inverse, which is what `fixme_undo_last_action` builds.
+
+        Args:
+            chosen: The actions returned by `compute` that will be executed.
+        """
         if not isinstance(self._policy, (InformedPolicy, InformedPolicyRandomWalk)):
             return
         self._policy._undo_action = fixme_undo_last_action(chosen[-1])
@@ -202,7 +218,17 @@ class SurfaceInteractivePolicy:
         return [action]
 
     def feedback(self, chosen: list[Action]) -> None:
-        pass
+        """Do nothing, because the surface policy's record is already correct.
+
+        The surface policy does not recover from off-object by reversing its last action
+        the way the informed policies do. When it falls off the object it runs its
+        `touch_object` search to find its way back to the object, which reads the
+        current state rather than any record of what actions were executed. So there
+        is nothing here for the user's choice to correct.
+
+        Args:
+            chosen: The actions returned by `compute` that will be executed. Unused.
+        """
 
 
 def interactive_policy_for(model: Monty) -> InteractivePolicy:
