@@ -15,14 +15,32 @@ classifiers = [
 dependencies = [
     "tbp.monty", # imported via conda
     "hydra-core>=1.3.2", # Hydra is used for configuring Monty
+    "matplotlib>=3.7.3", # imported via conda
+    "numpy", # imported via conda
+    "numpy-quaternion", # imported via conda (conda-forge::quaternion)
+    "opencv-python-headless==4.13.0.92", # see the `opencv-python` override below
+    "typing-extensions",
 ]
 description = "Visualize and teleoperate a Monty experiment in real-time "
 dynamic = ["version"]
 license = { file = "LICENSE" }
 name = "tbp.teleop"
 readme = "README.md"
+requires-python = ">=3.8"
 
 [project.optional-dependencies]
+# Forwards Monty's own simulator extra, so the simulator is installed alongside
+# teleop. MuJoCo requires Python >= 3.9, i.e. the uv environment.
+simulator_mujoco = [
+    "tbp.monty[simulator_mujoco]",
+]
+
+# Interactive GUI backend (QtAgg) required by the live plotter. The conda
+# environment gets this from conda-forge::pyqt instead.
+gui = [
+    "PyQt5",
+]
+
 dev = [
     # Check for undeclared dependencies
     "deptry",
@@ -44,10 +62,31 @@ dev = [
 Repository = "https://github.com/thousandbrainsproject/tbp.teleop"
 Issues = "https://github.com/thousandbrainsproject/tbp.teleop/issues"
 
+[tool.uv]
+# Monty depends on `opencv-python`, whose bundled Qt plugins overwrite
+# QT_QPA_PLATFORM_PLUGIN_PATH on import and crash PyQt5's xcb plugin. The marker
+# is never satisfied, which drops it in favor of the headless build declared
+# above; `environment[_arm64].yml` does the same for the conda environment.
+override-dependencies = ["opencv-python ; sys_platform == 'never'"]
+
+[tool.uv.sources]
+# Monty is not published to PyPI; point at a local checkout. This is the uv
+# counterpart to the `-e ../tbp.monty` entry in `environment[_arm64].yml`.
+"tbp.monty" = { path = "../feat.janus", editable = true }
+
+[tool.uv.extra-build-dependencies]
+# torch-scatter and torch-sparse are sdist-only and import torch while building.
+torch-scatter = ["setuptools", "torch"]
+torch-sparse = ["torch"]
+
 [tool.deptry]
 exclude = ["venv", "\\.venv", "\\.direnv", "\\.git", "setup\\.py"]
 experimental_namespace_package = true # recognize `tbp.` prefixed packages as a namespace package
 ignore = ["DEP002"]
+
+[tool.deptry.package_module_name_map]
+matplotlib = ["matplotlib", "mpl_toolkits"]
+numpy-quaternion = ["quaternion"]
 
 
 [tool.mypy]
