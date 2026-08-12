@@ -315,28 +315,44 @@ def draw_2d_segments(
     ax.set_aspect("equal")
 
 
-def draw_section_dividers(fig: Figure, sim_spec, monty_spec, details_spec) -> None:
-    """Draw vertical separators in the gaps between the three column sections.
+def draw_section_dividers(fig: Figure, *specs) -> None:
+    """Draw vertical separators between adjacent top-level UI sections.
 
-    Args:
-        fig: The figure to draw the separators on.
-        sim_spec: The Simulator column's subplot spec.
-        monty_spec: The Monty column's subplot spec.
-        details_spec: The Details column's subplot spec.
+    Using *specs keeps the helper independent of how many sections LivePlotter
+    happens to have. Calling this with the original three specs produces the
+    same two separators as before; passing four produces three.
     """
-    sim = sim_spec.get_position(fig)
-    monty = monty_spec.get_position(fig)
-    details = details_spec.get_position(fig)
+
+    # Convert each GridSpec region into its actual figure-coordinate bounds.
+    boxes = [spec.get_position(fig) for spec in specs]
+
+    # Keep the separator away from the labels on the section to its right.
+    # This is the same margin used by the previous three-column implementation.
     label_margin = 0.05
-    gaps = [
-        min((sim.x1 + monty.x0) / 2, monty.x0 - label_margin),
-        min((monty.x1 + details.x0) / 2, details.x0 - label_margin),
-    ]
-    for x in gaps:
+
+    # Pair each section with its immediate neighbor:
+    #
+    #   [Simulator, Monty, Details, Memory]
+    #
+    # becomes:
+    #
+    #   (Simulator, Monty)
+    #   (Monty, Details)
+    #   (Details, Memory)
+    for left, right in zip(boxes, boxes[1:]):
+        # Normally put the line halfway through the whitespace between panels.
+        #
+        # If that would get too close to the right-hand panel's labels, shift
+        # it left by the same amount the old implementation did.
+        x = min(
+            (left.x1 + right.x0) / 2,
+            right.x0 - label_margin,
+        )
+
         fig.add_artist(
             Line2D(
                 [x, x],
-                [sim.y0, sim.y1],
+                [left.y0, left.y1],
                 transform=fig.transFigure,
                 color="0.7",
                 linewidth=1,
