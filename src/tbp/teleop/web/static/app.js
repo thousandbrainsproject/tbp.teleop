@@ -249,25 +249,35 @@ registerRenderer("placeholder", (host, record) => {
 registerRenderer("point_cloud", (host, initial, key) => {
   const shell = document.createElement("div");
   shell.className = "cloud-shell";
+
   const wrap = document.createElement("div");
   wrap.className = "canvas-wrap";
+
   const canvas = document.createElement("canvas");
   wrap.append(canvas);
+
   const legend = document.createElement("div");
   legend.className = "legend";
   wrap.append(legend);
+
   const projectionRow = document.createElement("div");
   projectionRow.className = "projection-row";
+
   const projections = ["XY", "XZ", "YZ"].map((name) => {
     const node = document.createElement("div");
     node.className = "projection";
+
     const child = document.createElement("canvas");
+
     const label = document.createElement("span");
     label.textContent = name;
+
     node.append(child, label);
     projectionRow.append(node);
+
     return child;
   });
+
   shell.append(wrap, projectionRow);
   host.append(shell);
 
@@ -278,59 +288,278 @@ registerRenderer("point_cloud", (host, initial, key) => {
   let lastY = 0;
   let camera = cameraFor(cameraKey);
 
+  /*
+   * ------------------------------------------------------------
+   * Memory thumbnail auto-rotation
+   * ------------------------------------------------------------
+   *
+   * Only Memory point clouds rotate automatically.
+   *
+   * Other users of this renderer -- such as the main Monty panel
+   * and Details point clouds -- continue behaving exactly as they
+   * did before.
+   */
+  const AUTO_ROTATE_SPEED = 0.08;
+  const AUTO_ROTATE_IDLE_MS = 900;
+
+  let animationFrame = null;
+  let previousTime = performance.now();
+  let lastInteractionTime = previousTime;
+
+  const isMemoryThumbnail = () =>
+    cameraKey.startsWith("extra:memory:");
+
+  const noteInteraction = () => {
+    lastInteractionTime = performance.now();
+  };
+
   const draw = () => {
     drawCloud(canvas, data, camera);
+
     projectionRow.hidden = !data.projections;
+
     if (data.projections) {
-      drawProjection(projections[0], data, 0, 1);
-      drawProjection(projections[1], data, 0, 2);
-      drawProjection(projections[2], data, 1, 2);
+      drawProjection(
+        projections[0],
+        data,
+        0,
+        1,
+      );
+
+      drawProjection(
+        projections[1],
+        data,
+        0,
+        2,
+      );
+
+      drawProjection(
+        projections[2],
+        data,
+        1,
+        2,
+      );
     }
-    renderLegend(legend, data.groups || []);
+
+    renderLegend(
+      legend,
+      data.groups || [],
+    );
   };
-  const resize = new ResizeObserver(draw);
+
+  /*
+   * Run a lightweight animation loop for this renderer.
+   *
+   * The camera yaw is changed rather than the underlying points,
+   * so the stored object geometry remains untouched.
+   */
+  const animate = (now) => {
+    /*
+     * Convert elapsed time to seconds.
+     *
+     * Clamp large jumps so switching browser tabs does not cause
+     * the object to suddenly rotate a large amount when returning.
+     */
+    const dt = Math.min(
+      (now - previousTime) / 1000,
+      0.05,
+    );
+
+    previousTime = now;
+
+    const idleLongEnough =
+      now - lastInteractionTime
+      >= AUTO_ROTATE_IDLE_MS;
+
+    /*
+     * Auto-rotate only when:
+     *
+     *   1. this renderer belongs to a Memory thumbnail,
+     *   2. the user is not currently dragging it,
+     *   3. no Memory merge animation is active,
+     *   4. enough time has passed since manual interaction,
+     *   5. the browser tab is visible.
+     */
+    const shouldRotate =
+      isMemoryThumbnail()
+      && !dragging
+      && !state.memoryMerge
+      && idleLongEnough
+      && !document.hidden;
+
+    if (shouldRotate) {
+      camera.yaw +=
+        AUTO_ROTATE_SPEED * dt;
+
+      draw();
+    }
+
+    animationFrame =
+      requestAnimationFrame(animate);
+  };
+
+  const resize =
+    new ResizeObserver(draw);
+
   resize.observe(wrap);
   resize.observe(projectionRow);
 
-  canvas.addEventListener("pointerdown", (event) => {
-    dragging = true;
-    lastX = event.clientX;
-    lastY = event.clientY;
-    canvas.setPointerCapture(event.pointerId);
-  });
-  canvas.addEventListener("pointermove", (event) => {
-    if (!dragging) return;
-    camera.yaw += (event.clientX - lastX) * 0.008;
-    camera.pitch = clamp(camera.pitch + (event.clientY - lastY) * 0.008, -1.45, 1.45);
-    lastX = event.clientX;
-    lastY = event.clientY;
-    draw();
-  });
-  canvas.addEventListener("pointerup", () => { dragging = false; });
-  canvas.addEventListener("pointercancel", () => { dragging = false; });
-  canvas.addEventListener("wheel", (event) => {
-    event.preventDefault();
-    camera.zoom = clamp(camera.zoom * Math.exp(-event.deltaY * 0.001), 0.55, 2.5);
-    draw();
-  }, { passive: false });
+  /*
+   * ------------------------------------------------------------
+   * Manual camera interaction
+   * ------------------------------------------------------------
+   *
+   * Touching/dragging the model immediately stops auto-rotation.
+   */
+  canvas.addEventListener(
+    "pointerdown",
+    (event) => {
+      dragging = true;
+      noteInteraction();
 
-  const update = (next, nextKey) => {
+      lastX = event.clientX;
+      lastY = event.clientY;
+
+      canvas.setPointerCapture(
+        event.pointerId,
+      );
+    },
+  );
+
+  canvas.addEventListener(
+    "pointermove",
+    (event) => {
+      if (!dragging) return;
+
+      noteInteraction();
+
+      camera.yaw +=
+        (event.clientX - lastX)
+        * 0.008;
+
+      camera.pitch = clamp(
+        camera.pitch
+          + (event.clientY - lastY)
+          * 0.008,
+        -1.45,
+        1.45,
+      );
+
+      lastX = event.clientX;
+      lastY = event.clientY;
+
+      draw();
+    },
+  );
+
+  canvas.addEventListener(
+    "pointerup",
+    () => {
+      dragging = false;
+      noteInteraction();
+    },
+  );
+
+  canvas.addEventListener(
+    "pointercancel",
+    () => {
+      dragging = false;
+      noteInteraction();
+    },
+  );
+
+  canvas.addEventListener(
+    "wheel",
+    (event) => {
+      event.preventDefault();
+      noteInteraction();
+
+      camera.zoom = clamp(
+        camera.zoom
+          * Math.exp(
+            -event.deltaY * 0.001,
+          ),
+        0.55,
+        2.5,
+      );
+
+      draw();
+    },
+    {
+      passive: false,
+    },
+  );
+
+  /*
+   * Normal renderer update.
+   *
+   * If this renderer begins displaying a different object, switch
+   * to that object's persistent camera just as before.
+   */
+  const update = (
+    next,
+    nextKey,
+  ) => {
     data = next;
+
     if (nextKey !== cameraKey) {
       cameraKey = nextKey;
       camera = cameraFor(cameraKey);
+
+      /*
+       * Treat switching objects as an interaction so a newly
+       * displayed object rests briefly before beginning to turn.
+       */
+      noteInteraction();
     }
+
     draw();
   };
+
+  /*
+   * Reset the view to Teleop's normal default camera.
+   *
+   * Auto-rotation waits briefly after reset before resuming.
+   */
   const reset = () => {
     camera.yaw = -0.72;
     camera.pitch = 0.52;
     camera.zoom = 1;
+
+    noteInteraction();
     draw();
   };
+
+  /*
+   * Draw immediately, then start the idle animation loop.
+   */
   draw();
-  return { update, reset, cleanup: () => resize.disconnect() };
+
+  animationFrame =
+    requestAnimationFrame(animate);
+
+  return {
+    update,
+    reset,
+
+    cleanup() {
+      resize.disconnect();
+
+      /*
+       * Important when a Memory card disappears or its renderer
+       * gets replaced: don't leave an orphaned RAF loop running.
+       */
+      if (animationFrame !== null) {
+        cancelAnimationFrame(
+          animationFrame,
+        );
+
+        animationFrame = null;
+      }
+    },
+  };
 });
+
 
 registerRenderer("planar_cloud", (host, initial) => {
   const shell = document.createElement("div");
@@ -358,6 +587,191 @@ function cameraFor(key) {
     state.camera.set(key, { yaw: -0.72, pitch: 0.52, zoom: 1 });
   }
   return state.camera.get(key);
+}
+
+function drawMemoryMergeFlyer(
+  canvas,
+  points,
+  colors,
+  merge,
+  seriesIndex,
+  frame,
+  camera,
+) {
+  const {
+    ctx,
+    width,
+    height,
+    dpr,
+  } = canvasContext(canvas);
+
+  ctx.clearRect(
+    0,
+    0,
+    width,
+    height,
+  );
+
+  if (!points?.length) return;
+
+  if (merge.is_3d) {
+    drawMemoryMergeFlyer3D(
+      ctx,
+      width,
+      height,
+      dpr,
+      points,
+      colors,
+      frame,
+      camera,
+      seriesIndex,
+    );
+  } else {
+    drawMemoryMergeFlyer2D(
+      ctx,
+      width,
+      height,
+      dpr,
+      points,
+      colors,
+      frame,
+      seriesIndex,
+    );
+  }
+}
+
+
+function drawMemoryMergeFlyer3D(
+  ctx,
+  width,
+  height,
+  dpr,
+  points,
+  colors,
+  frame,
+  camera,
+  seriesIndex,
+) {
+  const center = pad3(
+    frame.center || [0, 0, 0],
+  );
+
+  const half = Math.max(
+    Number(frame.half) || 0.025,
+    1e-9,
+  );
+
+  const baseScale =
+    Math.min(width, height)
+    * 0.34
+    * camera.zoom;
+
+  const project = (point) =>
+    project3D(
+      point,
+      center,
+      half,
+      camera,
+      width,
+      height,
+      baseScale,
+    );
+
+  const marks = points.map(
+    (point, pointIndex) => {
+      const projected = project(point);
+
+      return {
+        ...projected,
+        color:    
+          colors?.[pointIndex]
+          || seriesColor(seriesIndex),
+      };
+    },
+  );
+
+  marks.sort(
+    (a, b) => a.depth - b.depth,
+  );
+
+  for (const mark of marks) {
+    ctx.beginPath();
+
+    ctx.arc(
+      mark.x,
+      mark.y,
+      2.2 * dpr,
+      0,
+      Math.PI * 2,
+    );
+
+    ctx.fillStyle = mark.color;
+    ctx.globalAlpha = 1;
+    ctx.fill();
+  }
+
+  ctx.globalAlpha = 1;
+}
+
+function drawMemoryMergeFlyer2D(
+  ctx,
+  width,
+  height,
+  dpr,
+  points,
+  colors,
+  frame,
+  seriesIndex,
+) {
+  const center =
+    frame.center || [0, 0];
+
+  const half = Math.max(
+    Number(frame.half) || 0.025,
+    1e-9,
+  );
+
+  const scale =
+    Math.min(width, height)
+    * 0.42
+    / half;
+
+  for (
+    let pointIndex = 0;
+    pointIndex < points.length;
+    pointIndex += 1
+  ) {
+    const point = points[pointIndex];
+
+    const x =
+      width / 2
+      + (point[0] - center[0])
+      * scale;
+
+    const y =
+      height / 2
+      - (point[1] - center[1])
+      * scale;
+
+    ctx.beginPath();
+
+    ctx.arc(
+      x,
+      y,
+      2.3 * dpr,
+      0,
+      Math.PI * 2,
+    );
+
+    ctx.fillStyle =
+      colors?.[pointIndex]
+      || seriesColor(seriesIndex);
+
+    ctx.globalAlpha = 1;
+    ctx.fill();
+  }
+
+  ctx.globalAlpha = 1;
 }
 
 function drawCloud(canvas, data, camera) {
@@ -799,30 +1213,254 @@ function renderChartLegend(host, series) {
 }
 
 function renderExtras(extras) {
-  const signature = extras.map((item) => `${item.id}:${item.kind}`).join("|");
-  if (el.extras.dataset.signature !== signature) {
-    el.extras.replaceChildren();
-    el.extras.dataset.signature = signature;
-    for (const item of extras) {
-      const card = document.createElement("article");
-      card.className = "panel channel-card";
-      card.dataset.extra = item.id;
-      const head = document.createElement("div");
-      head.className = "channel-card-head";
-      const title = document.createElement("strong");
-      title.textContent = item.title || item.id;
-      head.append(title);
-      const host = document.createElement("div");
-      host.className = "viz-host mini-viz";
-      host.dataset.extraViz = "true";
-      card.append(head, host);
-      el.extras.append(card);
+  /*
+   * Record the current position of every existing card.
+   *
+   * This is the "First" part of FLIP.
+   */
+  const before = new Map();
+
+  for (
+    const card
+    of [...el.extras.children]
+  ) {
+    if (!card.dataset.extra) {
+      continue;
+    }
+
+    before.set(
+      card.dataset.extra,
+      card.getBoundingClientRect(),
+    );
+  }
+
+  const wantedIds = new Set(
+    extras.map(
+      (item) => item.id,
+    ),
+  );
+
+  /*
+   * Remove models that genuinely disappeared.
+   *
+   * In a merge, absorbed source cards disappear here
+   * when the next normal Memory snapshot arrives.
+   */
+  for (
+    const card
+    of [...el.extras.children]
+  ) {
+    const id =
+      card.dataset.extra;
+
+    if (!wantedIds.has(id)) {
+      const host =
+        card.querySelector(
+          '[data-extra-viz="true"]',
+        );
+
+      host?._rendererHandle
+        ?.cleanup?.();
+
+      card.remove();
     }
   }
+
+  /*
+   * Update existing cards and create new cards.
+   */
   for (const item of extras) {
-    const card = [...el.extras.children].find((node) => node.dataset.extra === item.id);
-    if (card) renderVisualization(card.querySelector('[data-extra-viz="true"]'), item, `extra:${item.id}`);
+    let card =
+      [...el.extras.children].find(
+        (node) =>
+          node.dataset.extra ===
+          item.id,
+      );
+
+    if (!card) {
+      card =
+        document.createElement(
+          "article",
+        );
+
+      card.className =
+        "panel channel-card";
+
+      card.dataset.extra =
+        item.id;
+
+      const head =
+        document.createElement(
+          "div",
+        );
+
+      head.className =
+        "channel-card-head";
+
+      const title =
+        document.createElement(
+          "strong",
+        );
+
+      head.append(title);
+
+      const host =
+        document.createElement(
+          "div",
+        );
+
+      host.className =
+        "viz-host mini-viz";
+
+      host.dataset.extraViz =
+        "true";
+
+      card.append(
+        head,
+        host,
+      );
+
+      /*
+       * Initially append new cards.
+       *
+       * The ordering pass below will place them
+       * into their correct evidence-ranked slot.
+       */
+      el.extras.append(card);
+    }
+
+    const title =
+      card.querySelector(
+        "strong",
+      );
+
+    if (title) {
+      title.textContent =
+        item.title || item.id;
+    }
+
+    const host =
+      card.querySelector(
+        '[data-extra-viz="true"]',
+      );
+
+    renderVisualization(
+      host,
+      item,
+      `extra:${item.id}`,
+    );
   }
+
+  /*
+   * IMPORTANT:
+   *
+   * `extras` arrives from Python already ordered by
+   * evidence, highest evidence first.
+   *
+   * Reorder the existing DOM nodes to match that order.
+   *
+   * append(existingNode) MOVES the node; it does not
+   * recreate it, so canvases/renderers/camera state
+   * remain intact.
+   */
+  const cardsById = new Map(
+    [...el.extras.children].map(
+      (card) => [
+        card.dataset.extra,
+        card,
+      ],
+    ),
+  );
+
+  for (const item of extras) {
+    const card =
+      cardsById.get(item.id);
+
+    if (!card) continue;
+
+    el.extras.append(card);
+  }
+
+  /*
+   * FLIP animation.
+   *
+   * At this point both:
+   *
+   *   1. removed Memory models
+   *   2. evidence-driven reordering
+   *
+   * have already changed the layout.
+   *
+   * Animate directly from each card's previous
+   * location to its final location.
+   */
+  requestAnimationFrame(() => {
+    for (
+      const card
+      of [...el.extras.children]
+    ) {
+      const first =
+        before.get(
+          card.dataset.extra,
+        );
+
+      /*
+       * Newly-created cards did not have an old position.
+       */
+      if (!first) continue;
+
+      const last =
+        card.getBoundingClientRect();
+
+      const dx =
+        first.left - last.left;
+
+      const dy =
+        first.top - last.top;
+
+      if (
+        Math.abs(dx) < 0.5
+        && Math.abs(dy) < 0.5
+      ) {
+        continue;
+      }
+
+      /*
+       * Cancel an older layout animation if another
+       * evidence update arrives before it finishes.
+       */
+      card._layoutAnimation?.cancel?.();
+
+      card._layoutAnimation =
+        card.animate(
+          [
+            {
+              transform:
+                `translate(${dx}px, ${dy}px)`,
+            },
+            {
+              transform:
+                "translate(0, 0)",
+            },
+          ],
+          {
+            duration: 220,
+            easing:
+              "cubic-bezier(0.22, 1, 0.36, 1)",
+          },
+        );
+
+      card._layoutAnimation.addEventListener(
+        "finish",
+        () => {
+          card._layoutAnimation = null;
+        },
+        {
+          once: true,
+        },
+      );
+    }
+  });
 }
 
 function memoryExtraCard(graphId) {
@@ -831,101 +1469,656 @@ function memoryExtraCard(graphId) {
   );
 }
 
-function drawMemoryMerge(sourcePoints, progress, mergedAlpha) {
+function memoryExtraViz(graphId) {
+  return memoryExtraCard(graphId)?.querySelector(
+    '[data-extra-viz="true"]',
+  ) || null;
+}
+
+
+function memoryExtraCanvas(graphId) {
+  return memoryExtraViz(graphId)?.querySelector(
+    "canvas",
+  ) || null;
+}
+
+
+function memoryExtraRecord(graphId) {
+  return (state.frame?.extras || []).find(
+    (item) => item.id === `memory:${graphId}`,
+  ) || null;
+}
+
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+
+function interpolateMergeFrame(
+  fromFrame,
+  toFrame,
+  t,
+  is3d,
+) {
+  const fromCenter = pad3(
+    fromFrame?.center || [0, 0, 0],
+  );
+
+  const toCenter = pad3(
+    toFrame?.center || [0, 0, 0],
+  );
+
+  const dimensions = is3d ? 3 : 2;
+
+  return {
+    center: Array.from(
+      { length: dimensions },
+      (_, index) =>
+        lerp(
+          fromCenter[index],
+          toCenter[index],
+          t,
+        ),
+    ),
+
+    half: lerp(
+      Number(fromFrame?.half) || 0.025,
+      Number(toFrame?.half) || 0.025,
+      t,
+    ),
+  };
+}
+
+
+function copyCamera(key) {
+  const camera = cameraFor(key);
+
+  return {
+    yaw: camera.yaw,
+    pitch: camera.pitch,
+    zoom: camera.zoom,
+  };
+}
+
+
+function interpolateCamera(from, to, t) {
+  return {
+    yaw: lerp(from.yaw, to.yaw, t),
+    pitch: lerp(from.pitch, to.pitch, t),
+    zoom: lerp(from.zoom, to.zoom, t),
+  };
+}
+
+
+
+
+function cleanupMemoryMergeFlyers(
+  restoreSources = false,
+) {
+  const merge =
+    state.memoryMerge;
+
+  if (!merge?.flyers) return;
+
+  for (
+    const flyer
+    of merge.flyers.values()
+  ) {
+    flyer.canvas?.remove();
+
+    if (
+      restoreSources
+      && flyer.sourceHost
+    ) {
+      flyer.sourceHost.style.visibility =
+        "";
+    }
+  }
+
+  merge.flyers.clear();
+}
+
+
+function beginMemoryMergeFlyers(message) {
   const merge = state.memoryMerge;
 
   if (!merge) return;
 
-  const target = memoryExtraCard(merge.target_id);
+  /*
+   * Measure the ACTUAL rendered target canvas,
+   * not the surrounding mini-viz host.
+   */
+  const targetCanvas =
+    memoryExtraCanvas(
+      message.target_id,
+    );
+
+  if (!targetCanvas) return;
+
+  const targetRect =
+    targetCanvas.getBoundingClientRect();
+
+  merge.flyers = new Map();
+
+  Object.entries(
+    message.source_points || {},
+  ).forEach(
+    ([sourceId, points], index) => {
+      const sourceHost =
+        memoryExtraViz(sourceId);
+
+      const sourceCanvas =
+        memoryExtraCanvas(sourceId);
+
+      if (
+        !sourceHost
+        || !sourceCanvas
+      ) {
+        return;
+      }
+
+      /*
+       * Measure the actual source canvas.
+       */
+      const sourceRect =
+        sourceCanvas.getBoundingClientRect();
+
+      if (
+        sourceRect.width <= 0
+        || sourceRect.height <= 0
+        || targetRect.width <= 0
+        || targetRect.height <= 0
+      ) {
+        return;
+      }
+
+      /*
+       * Get the EXACT frame the source Memory thumbnail
+       * was using before the merge.
+       */
+      const sourceRecord =
+        memoryExtraRecord(sourceId);
+
+      const sourceFrame =
+        sourceRecord?.frame
+        || inferFrame(points);
+
+      /*
+       * Preserve the camera the source thumbnail
+       * was actually using.
+       *
+       * renderExtras() uses:
+       *
+       *   extra:${item.id}
+       *
+       * and item.id is memory:<graph id>,
+       *
+       * so this is the normal source camera key.
+       */
+      const sourceCamera =
+        copyCamera(
+          `extra:memory:${sourceId}`,
+        );
+
+      /*
+       * This is the camera the destination merge
+       * renderer will use.
+       */
+      const targetCamera =
+        copyCamera(
+          `extra:memory:${message.target_id}`,
+        );
+
+      const canvas =
+        document.createElement(
+          "canvas",
+        );
+
+      canvas.className =
+        "memory-merge-model-flyer";
+
+      /*
+       * START EXACTLY ON THE SOURCE CANVAS.
+       *
+       * No target sizing yet.
+       */
+      canvas.style.left =
+        `${sourceRect.left}px`;
+
+      canvas.style.top =
+        `${sourceRect.top}px`;
+
+      canvas.style.width =
+        `${sourceRect.width}px`;
+
+      canvas.style.height =
+        `${sourceRect.height}px`;
+
+      document.body.append(canvas);
+
+      /*
+       * At frame zero:
+       *
+       *   position = source position
+       *   size     = source canvas size
+       *   frame    = source model frame
+       *   camera   = source camera
+       *
+       * Therefore it should visually match the source
+       * thumbnail before that thumbnail disappears.
+       */
+      drawMemoryMergeFlyer(
+        canvas,
+        points,
+        merge.source_colors?.[sourceId],
+        merge,
+        index + 1,
+        sourceFrame,
+        sourceCamera,
+      );
+
+      /*
+       * Hide only the old model drawing.
+       * The card remains completely stationary.
+       */
+      sourceHost.style.visibility =
+        "hidden";
+
+      merge.flyers.set(
+        sourceId,
+        {
+          id: sourceId,
+
+          canvas,
+          sourceHost,
+          colors:
+            merge.source_colors?.[sourceId],
+
+          /*
+           * Screen-space endpoints.
+           */
+          startLeft:
+            sourceRect.left,
+
+          startTop:
+            sourceRect.top,
+
+          startWidth:
+            sourceRect.width,
+
+          startHeight:
+            sourceRect.height,
+
+          targetLeft:
+            targetRect.left,
+
+          targetTop:
+            targetRect.top,
+
+          targetWidth:
+            targetRect.width,
+
+          targetHeight:
+            targetRect.height,
+
+          /*
+           * World-space endpoints.
+           */
+          sourceFrame,
+
+          targetFrame:
+            merge.frame,
+
+          /*
+           * Camera endpoints.
+           */
+          sourceCamera,
+          targetCamera,
+
+          seriesIndex:
+            index + 1,
+        },
+      );
+    },
+  );
+}
+
+
+function updateMemoryMergeFlyers(
+  sourcePoints,
+  transformProgress,
+  docked,
+) {
+  const merge =
+    state.memoryMerge;
+
+  if (!merge?.flyers) return;
+
+  const travel = clamp(
+    Number(
+      transformProgress,
+    ) || 0,
+    0,
+    1,
+  );
+
+  for (
+    const [
+      sourceId,
+      flyer,
+    ]
+    of merge.flyers
+  ) {
+    /*
+     * --------------------------------------------------
+     * 1. SCREEN-SPACE INTERPOLATION
+     * --------------------------------------------------
+     *
+     * Start as the exact source canvas.
+     * Finish as the exact destination canvas.
+     */
+    const left = lerp(
+      flyer.startLeft,
+      flyer.targetLeft,
+      travel,
+    );
+
+    const top = lerp(
+      flyer.startTop,
+      flyer.targetTop,
+      travel,
+    );
+
+    const width = lerp(
+      flyer.startWidth,
+      flyer.targetWidth,
+      travel,
+    );
+
+    const height = lerp(
+      flyer.startHeight,
+      flyer.targetHeight,
+      travel,
+    );
+
+    flyer.canvas.style.left =
+      `${left}px`;
+
+    flyer.canvas.style.top =
+      `${top}px`;
+
+    flyer.canvas.style.width =
+      `${width}px`;
+
+    flyer.canvas.style.height =
+      `${height}px`;
+
+    /*
+     * No CSS scale().
+     *
+     * We resize the actual canvas and redraw it instead.
+     * This avoids scaling already-rasterized dots.
+     */
+    flyer.canvas.style.transform = "";
+
+    /*
+     * --------------------------------------------------
+     * 2. WORLD-FRAME INTERPOLATION
+     * --------------------------------------------------
+     *
+     * At t=0:
+     *     source's normal fitted frame
+     *
+     * At t=1:
+     *     exact merge.frame
+     */
+    const frame =
+      interpolateMergeFrame(
+        flyer.sourceFrame,
+        flyer.targetFrame,
+        travel,
+        merge.is_3d,
+      );
+
+    /*
+     * --------------------------------------------------
+     * 3. CAMERA INTERPOLATION
+     * --------------------------------------------------
+     *
+     * Mostly important for 3D.
+     *
+     * This also means a zoomed source object won't suddenly
+     * inherit a different destination zoom on frame one.
+     */
+    const camera =
+      interpolateCamera(
+        flyer.sourceCamera,
+        flyer.targetCamera,
+        travel,
+      );
+
+    /*
+     * --------------------------------------------------
+     * 4. REDRAW THE ACTUAL RF-TRANSFORMED POINTS
+     * --------------------------------------------------
+     */
+    drawMemoryMergeFlyer(
+      flyer.canvas,
+
+      sourcePoints?.[
+        sourceId
+      ] || [],
+
+      flyer.colors,
+
+      merge,
+
+      flyer.seriesIndex,
+
+      frame,
+
+      camera,
+    );
+
+    /*
+     * At the exact docking frame, drawMemoryMerge()
+     * already places these transformed source points
+     * into the real target canvas.
+     *
+     * Remove the temporary flying copy.
+     */
+    flyer.canvas.style.opacity =
+      docked ? "0" : "1";
+  }
+}
+
+
+function drawMemoryMerge(
+  sourcePoints,
+  transformProgress,
+  mergedAlpha,
+) {
+  const merge = state.memoryMerge;
+
+  if (!merge) return;
+
+  const target = memoryExtraCard(
+    merge.target_id,
+  );
+
   const host = target?.querySelector(
     '[data-extra-viz="true"]',
   );
 
   if (!host) return;
 
-  // The target Memory card temporarily becomes a composite:
-  //
-  //   original target
-  //   + moving source graph(s)
-  //   + actual final merged model
-  //
-  // During the final 20%, the first two fade out while the final
-  // model fades in.
+  /*
+   * Gradually tighten the animation frame to the
+   * final merged model during the final crossfade.
+   */
+  const finalTransition =
+    clamp(
+      Number(mergedAlpha) || 0,
+      0,
+      1,
+    );
+
+  const displayFrame =
+    interpolateMergeFrame(
+      merge.frame,
+      merge.finalFrame,
+      finalTransition,
+      merge.is_3d,
+    );
+
+  /*
+   * Has the moving source reached the target?
+   */
+  const docked =
+    Number(transformProgress || 0) >= 0.999;
+
+  const oldModelAlpha =
+    1 - mergedAlpha;
+
+  /*
+   * Existing target model.
+   */
   const groups = [
     {
       label: merge.target_id,
       points: merge.target_points,
+      colors: merge.target_colors,
       series_index: 0,
-      alpha: 1 - mergedAlpha,
-    },
-
-    ...Object.entries(sourcePoints || {}).map(
-      ([id, points], index) => ({
-        label: id,
-        points,
-        series_index: index + 1,
-        alpha: 1 - mergedAlpha,
-      }),
-    ),
-
-    {
-      label: merge.new_graph_id,
-      points: merge.merged_points,
-      series_index:
-        Object.keys(sourcePoints || {}).length + 1,
-      alpha: mergedAlpha,
+      alpha: oldModelAlpha,
     },
   ];
 
-  const visualization = merge.is_3d
-    ? {
-        kind: "point_cloud",
-        groups,
-        projections: false,
-        frame: merge.frame,
-      }
-    : {
-        kind: "planar_cloud",
-        groups,
-        frame: merge.frame,
-      };
+  /*
+   * Once the moving source reaches the target,
+   * draw its transformed points directly in the
+   * target canvas.
+   */
+  if (docked) {
+    Object.entries(
+      sourcePoints || {},
+    ).forEach(
+      ([id, points], index) => {
+        groups.push({
+          label: id,
+          points,
+          colors:
+            merge.source_colors?.[id],
+          series_index:
+            index + 1,
+          alpha:
+            oldModelAlpha,
+        });
+      },
+    );
+  }
 
+  /*
+   * Final merged model.
+   *
+   * It fades in during the final portion of
+   * the animation.
+   */
+  groups.push({
+    label:
+      merge.new_graph_id,
+
+    points:
+      merge.merged_points,
+
+    colors:
+      merge.merged_colors,
+
+    series_index:
+      Object.keys(
+        sourcePoints || {},
+      ).length + 1,
+
+    alpha:
+      mergedAlpha,
+  });
+
+  /*
+   * Use displayFrame rather than merge.frame.
+   *
+   * displayFrame gradually changes from the broad
+   * animation bounds to the tight final model bounds.
+   */
+  const visualization =
+    merge.is_3d
+      ? {
+          kind:
+            "point_cloud",
+
+          groups,
+
+          projections:
+            false,
+
+          frame:
+            displayFrame,
+        }
+      : {
+          kind:
+            "planar_cloud",
+
+          groups,
+
+          frame:
+            displayFrame,
+        };
+
+  /*
+   * Draw the destination first.
+   */
   renderVisualization(
     host,
     visualization,
-    `memory-merge:${merge.target_id}`,
+    `extra:memory:${merge.target_id}`,
   );
 
-  // Fade the original source Memory thumbnails as their points
-  // visually move into the target graph.
-  for (const id of Object.keys(sourcePoints || {})) {
-    const card = memoryExtraCard(id);
-
-    if (card) {
-      card.style.opacity = String(
-        Math.max(0, 1 - progress),
-      );
-    }
-  }
+  /*
+   * Then update the travelling source model.
+   */
+  updateMemoryMergeFlyers(
+    sourcePoints,
+    transformProgress,
+    docked,
+  );
 }
+
 
 function handleMemoryMerge(message) {
   if (message.type === "memory_merge_begin") {
+    // If an old animation somehow got interrupted, clean it up first.
+    if (state.memoryMerge) {
+      cleanupMemoryMergeFlyers(true);
+    }
+
     const target = memoryExtraCard(message.target_id);
 
-    // This mirrors MemoryPanel's existing behavior: if the target
-    // isn't one of the currently displayed Memory thumbnails, don't
-    // attempt to animate it.
+    // Same behavior as before: only animate if this Memory graph
+    // is actually visible in the current UI.
     if (!target) return;
 
     state.memoryMerge = {
       ...message,
 
-      // Use one fixed frame for the entire animation so rotating
-      // points don't cause the camera to zoom in/out.
+      // Fixed target frame prevents zoom jitter while the final model
+      // crossfades into place.
       frame: inferFrame(
         message.bounds_points || [],
       ),
+      // NEW:
+      finalFrame: inferFrame(
+        message.merged_points || [],
+      ),
+      flyers: new Map(),
     };
 
     const title = target.querySelector("strong");
@@ -935,6 +2128,11 @@ function handleMemoryMerge(message) {
         `${message.target_id} + sources → ${message.new_graph_id}`;
     }
 
+    // Create the source model(s) at their real current positions
+    // in the Memory grid.
+    beginMemoryMergeFlyers(message);
+
+    // Draw frame zero.
     drawMemoryMerge(
       message.source_points,
       0,
@@ -949,31 +2147,113 @@ function handleMemoryMerge(message) {
   if (message.type === "memory_merge_frame") {
     drawMemoryMerge(
       message.source_points,
-      Number(message.progress || 0),
-      Number(message.merged_alpha || 0),
+
+      // Physical travel and RF transform are now synchronized.
+      Number(
+        message.transform_progress || 0,
+      ),
+
+      Number(
+        message.merged_alpha || 0,
+      ),
     );
 
     return;
   }
 
   if (message.type === "memory_merge_end") {
-    // Restore source-card visibility.
-    // for (const card of el.extras.children) {
-    //   card.style.opacity = "";
+    const merge =
+      state.memoryMerge;
+
+    if (!merge) return;
+
+    /*
+    * The target card already contains the final merged
+    * visualization at this point.
+    *
+    * Rather than throwing that card away and creating a new
+    * one on the next normal frame, simply rename it to the
+    * final graph ID.
+    */
+    const targetCard =
+      memoryExtraCard(
+        merge.target_id,
+      );
+
+    if (targetCard) {
+      const oldCameraKey =
+        `extra:memory:${merge.target_id}`;
+
+      const newCameraKey =
+        `extra:memory:${merge.new_graph_id}`;
+
+      state.camera.set(
+        newCameraKey,
+        cameraFor(oldCameraKey),
+      );
+      targetCard.dataset.extra =
+        `memory:${merge.new_graph_id}`;
+
+      const title =
+        targetCard.querySelector(
+          "strong",
+        );
+
+      if (title) {
+        title.textContent =
+          merge.new_graph_id;
+      }
+    }
+
+    
+    
+    
+    /*
+    * IMPORTANT:
+    *
+    * Do NOT remove the source cards here.
+    *
+    * They're already visually hidden by the merge animation.
+    * Leave their DOM boxes in place until the next normal
+    * snapshot reconciles Memory.
+    *
+    * This prevents an immediate CSS-grid reflow at merge_end.
+    */
+
+    // /*
+    // * Remove the source Memory cards that were absorbed.
+    // */
+    // for (
+    //   const sourceId
+    //   of Object.keys(
+    //     merge.source_points || {},
+    //   )
+    // ) {
+    //   const sourceCard =
+    //     memoryExtraCard(sourceId);
+
+    //   if (!sourceCard) continue;
+
+    //   const host =
+    //     sourceCard.querySelector(
+    //       '[data-extra-viz="true"]',
+    //     );
+
+    //   host?._rendererHandle
+    //     ?.cleanup?.();
+
+    //   sourceCard.remove();
     // }
 
-    // const target = memoryExtraCard(
-    //   state.memoryMerge.target_id,
-    // );
-
-    // const title = target?.querySelector("strong");
-
-    // if (title) {
-    //   title.textContent =
-    //     state.memoryMerge.target_id;
-    // }
+    /*
+    * Remove only the temporary travelling canvases.
+    */
+    cleanupMemoryMergeFlyers(
+      false,
+    );
 
     state.memoryMerge = null;
+    return;
   }
 }
 
@@ -1062,6 +2342,18 @@ el.stepSlider.addEventListener("input", () => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (isEditing(event.target)) return;
+
+  // Prevent browser scrolling while keyboard-controlling Monty,
+  // including the brief gap between action requests.
+  if (
+    state.frame?.controls?.mode === "interactive"
+    && state.role === "controller"
+    && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(event.key)
+  ) {
+    event.preventDefault();
+  }
+  
   if (!state.actionRequest || isEditing(event.target)) return;
   const map = {
     w: "up", W: "up", ArrowUp: "up",
@@ -1074,7 +2366,6 @@ document.addEventListener("keydown", (event) => {
   if (!action) return;
   const valid = new Set([...(state.actionRequest.headings || []), ...(state.actionRequest.specials || [])]);
   if (!valid.has(action)) return;
-  event.preventDefault();
   chooseAction(action);
 });
 

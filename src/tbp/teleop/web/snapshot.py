@@ -500,8 +500,40 @@ class SnapshotBuilder:
             if pos.ndim != 2 or not pos.size:
                 continue
 
+            # ------------------------------------------------------------
+            # Read the per-node HSV color stored in the graph.
+            # ------------------------------------------------------------
+            hsv = None
+
+            if "hsv" in graph.feature_mapping:
+                hsv = np.asarray(
+                    graph.get_values_for_feature("hsv"),
+                    dtype=float,
+                )
+
+            # Convert Monty's HSV values into browser-ready RGB strings.
+            #
+            # Keep the colors in exactly the same node order as graph.pos,
+            # so colors[i] belongs to pos[i].
+            colors = None
+
+            if (
+                hsv is not None
+                and hsv.ndim == 2
+                and hsv.shape[0] == pos.shape[0]
+                and hsv.shape[1] >= 3
+            ):
+                colors = [
+                    _rgb_css(_hsv_to_rgb(row[:3]))
+                    for row in hsv
+                ]
+
+
             if _is_3d(pos):
                 # Match MemoryPanel / Monty inference orientation: Y, X, Z.
+                #
+                # This only rearranges coordinate dimensions; it does NOT
+                # rearrange node order, so colors still line up by index.
                 display = pos[:, [1, 0, 2]]
 
                 visualization = {
@@ -510,6 +542,9 @@ class SnapshotBuilder:
                         {
                             "label": None,
                             "points": display.tolist(),
+
+                            # NEW
+                            "colors": colors,
                         }
                     ],
                     "projections": False,
@@ -522,6 +557,10 @@ class SnapshotBuilder:
                 visualization = {
                     "kind": "planar_cloud",
                     "points": display.tolist(),
+
+                    # NEW
+                    "colors": colors,
+
                     "frame": _frame(display),
                 }
 
