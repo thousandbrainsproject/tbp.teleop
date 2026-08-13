@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+import copy
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -33,8 +34,12 @@ from tbp.teleop.panels import (
     DetailsPanel,
     MontyPanel,
     SimulatorPanel,
+    MemoryPanel
 )
 from tbp.teleop.plotter import Plotter
+from tbp.monty.frameworks.utils.spatial_arithmetics import (
+    apply_rf_transform_to_points,
+)
 
 if TYPE_CHECKING:
     from tbp.monty.context import RuntimeContext
@@ -110,6 +115,10 @@ class LivePlotter(Plotter):
         self.fig = None
         self._controls = None
 
+        # Graph-memory objects on which this plotter has installed its optional
+        # merge-animation callback.
+        self._merge_hook_memories = []
+
     def _lm_building_graph(self, lm: LearningModule) -> bool:
         """Whether a learning module is building a graph this step.
 
@@ -162,6 +171,7 @@ class LivePlotter(Plotter):
             model: The Monty model whose sensor and learning modules are plotted.
             supervised_lm_ids: The list of supervised learning module IDs.
         """
+        self._remove_merge_animation_hooks()
         self.model = model
         self._channel_view = ChannelView(model)
         self._controls = (
@@ -175,6 +185,7 @@ class LivePlotter(Plotter):
         self._supervised_lm_ids = supervised_lm_ids
 
         self._build_figure()
+        self._install_merge_animation_hooks()
 
     def _build_figure(self) -> None:
         """Build this episode's figure, axes, and widgets.
@@ -200,10 +211,12 @@ class LivePlotter(Plotter):
         self.fig.subplots_adjust(
             bottom=0.16, top=0.9, left=0.04, right=0.97, wspace=0.25
         )
-        outer = self.fig.add_gridspec(1, 3)
+        outer = self.fig.add_gridspec(1, 4)
         self._sim_spec = outer[0, 0]
         self._monty_spec = outer[0, 1]
         self._details_spec = outer[0, 2]
+        # NEW: this assignment is the piece your traceback says is missing.
+        self._memory_spec = outer[0, 3]
 
         self._simulator = SimulatorPanel(self.fig, self._sim_spec)
         self._monty = MontyPanel(self.fig, self._monty_spec, self._channel_view)
@@ -213,9 +226,26 @@ class LivePlotter(Plotter):
             self._channel_view,
             self._history,
         )
-        draw_section_dividers(
-            self.fig, self._sim_spec, self._monty_spec, self._details_spec
+
+        # NEW: importantly, pass the SAME ChannelView as Monty/Details.
+        #
+        # That is what makes the Memory panel follow the existing LM/channel
+        # selector without introducing another selector or callback.
+        self._memory = MemoryPanel(
+            self.fig,
+            self._memory_spec,
+            self._channel_view,
         )
+
+        # CHANGED: include the fourth section when drawing separators.
+        draw_section_dividers(
+            self.fig,
+            self._sim_spec,
+            self._monty_spec,
+            self._details_spec,
+            self._memory_spec,
+        )
+
         self._selector = SelectorBar(
             self.fig, self._monty_spec, self._channel_view, self._redraw
         )
@@ -277,6 +307,20 @@ class LivePlotter(Plotter):
 
         self._monty.draw_feature_inset()
 
+        # NEW:
+        #
+        # Memory is independent of whether this particular step is exploratory
+        # or matching, so do NOT add it separately to _draw_training() and
+        # _draw_inference().
+        #
+        # Putting it here means:
+        #
+        #   * it appears during both training and inference,
+        #   * it refreshes every experiment step,
+        #   * it refreshes after the existing LM/channel selector changes,
+        #   * there is only one new rendering call to maintain.
+        self._memory.draw()
+
         self.fig.canvas.draw_idle()
         self.fig.canvas.flush_events()
 
@@ -289,6 +333,330 @@ class LivePlotter(Plotter):
         if self.fig is None or self._last_observations is None:
             return
         self._render(self._last_observations, self._last_step)
+
+    def _install_merge_animation_hooks(self) -> None:
+        """Attach this plotter to graph memories that support merge telemetry."""
+        self._merge_hook_memories = []
+
+        for lm in self.model.learning_modules:
+            memory = getattr(lm, "graph_memory", None)
+
+            if memory is None:
+                continue
+
+            setter = getattr(
+                memory,
+                "set_merge_animation_callback",
+                None,
+            )
+
+            if not callable(setter):
+                continue
+
+            setter(self._animate_graph_merge)
+            self._merge_hook_memories.append(memory)
+
+
+    def _remove_merge_animation_hooks(self) -> None:
+        """Detach merge callbacks previously installed by this plotter."""
+        for memory in getattr(
+            self,
+            "_merge_hook_memories",
+            [],
+        ):
+            setter = getattr(
+                memory,
+                "set_merge_animation_callback",
+                None,
+            )
+
+            if callable(setter):
+                setter(None)
+
+        self._merge_hook_memories = []
+
+
+    def _animate_graph_merge(
+        self,
+        *,
+        memory,
+        first_graph_id: str,
+        new_graph_id: str,
+        old_graph_ids: tuple[str, ...],
+        location_rel_model: np.ndarray,
+        channels: dict,
+    ) -> None:
+        """Animate the exact RF transforms being used by a Janus graph merge."""
+
+        # Animation requires a GUI event loop.
+        if self.fig is None or not is_interactive_backend():
+            return
+
+        # Only animate merges for the LM currently selected in Teleop.
+        selected_memory = getattr(
+            self._channel_view.lm,
+            "graph_memory",
+            None,
+        )
+
+        if memory is not selected_memory:
+            return
+
+        if not channels:
+            return
+
+        # Match the Memory panel's existing channel preference:
+        #
+        #   selected channel if the merged graph has it,
+        #   otherwise first available merge channel.
+        channel = self._channel_view.channel
+
+        if channel not in channels:
+            channel = next(iter(channels))
+
+        event = channels[channel]
+
+        target_points = np.asarray(
+            event["target_points"],
+            dtype=float,
+        )
+
+        merged_points = np.asarray(
+            event["merged_points"],
+            dtype=float,
+        )
+
+        location_rel_model = np.asarray(
+            location_rel_model,
+            dtype=float,
+        )
+
+        # ------------------------------------------------------------
+        # Precompute the EXACT t=1 RF result for each source.
+        #
+        # This calls the exact same function GridObjectModel.update_model() uses.
+        # ------------------------------------------------------------
+        prepared_entries = []
+
+        bounds_parts = [
+            target_points,
+            merged_points,
+        ]
+
+        for entry in event["entries"]:
+            locations = np.asarray(
+                entry["locations"],
+                dtype=float,
+            )
+
+            features = copy.deepcopy(entry["features"])
+
+            object_location_rel_body = np.asarray(
+                entry["object_location_rel_body"],
+                dtype=float,
+            )
+
+            object_rotation = entry["object_rotation"]
+
+            final_locations, _final_features = apply_rf_transform_to_points(
+                locations=locations.copy(),
+                features=copy.deepcopy(features),
+                location_rel_model=location_rel_model.copy(),
+                object_location_rel_body=object_location_rel_body.copy(),
+                object_rotation=object_rotation,
+            )
+
+            final_locations = np.asarray(
+                final_locations,
+                dtype=float,
+            )
+
+            prepared_entries.append(
+                {
+                    "source_graph_id": entry["source_graph_id"],
+                    "locations": locations,
+                    "features": features,
+                    "object_location_rel_body": object_location_rel_body,
+                    "object_rotation": object_rotation,
+                    "final_locations": final_locations,
+                }
+            )
+
+            # Use both endpoints when computing fixed animation bounds.
+            bounds_parts.append(locations)
+            bounds_parts.append(final_locations)
+
+        non_empty_bounds = [
+            points
+            for points in bounds_parts
+            if points.size
+        ]
+
+        if non_empty_bounds:
+            bounds_points = np.vstack(non_empty_bounds)
+        else:
+            bounds_points = np.empty((0, 3))
+
+        # ------------------------------------------------------------
+        # Animation timing
+        #
+        # First 80%:
+        #     replay apply_rf_transform_to_points as the object rotates/translates
+        #
+        # Last 20%:
+        #     crossfade from transformed raw observations to the ACTUAL
+        #     voxel/grid-built merged model.
+        # ------------------------------------------------------------
+        n_frames = 40
+        # n_frames = 16
+
+        transform_end = 0.80
+
+        initial_source_points = {
+            entry["source_graph_id"]: entry["locations"].copy()
+            for entry in prepared_entries
+        }
+
+        self._memory.begin_merge_animation(
+            first_graph_id=first_graph_id,
+            new_graph_id=new_graph_id,
+            source_points=initial_source_points,
+            merged_points=merged_points,
+            bounds_points=bounds_points,
+        )
+
+        for frame in range(n_frames + 1):
+            overall_u = frame / n_frames
+
+            # Phase 1: transformation.
+            transform_u = min(
+                overall_u / transform_end,
+                1.0,
+            )
+
+            # Smoothstep.
+            transform_t = (
+                transform_u
+                * transform_u
+                * (3.0 - 2.0 * transform_u)
+            )
+
+            # Phase 2: crossfade to actual GridObjectModel output.
+            if overall_u <= transform_end:
+                merged_u = 0.0
+            else:
+                merged_u = (
+                    overall_u - transform_end
+                ) / (1.0 - transform_end)
+
+            merged_alpha = (
+                merged_u
+                * merged_u
+                * (3.0 - 2.0 * merged_u)
+            )
+
+            overall_t = (
+                overall_u
+                * overall_u
+                * (3.0 - 2.0 * overall_u)
+            )
+
+            frame_source_points = {}
+
+            for entry in prepared_entries:
+                source_graph_id = entry["source_graph_id"]
+                locations = entry["locations"]
+                object_rotation = entry["object_rotation"]
+                object_location_rel_body = entry[
+                    "object_location_rel_body"
+                ]
+
+                if transform_u <= 0.0:
+                    # Guarantee the very first frame is exactly the original model.
+                    frame_locations = locations.copy()
+
+                elif transform_u >= 1.0:
+                    # Guarantee the end of the RF phase is exactly the same result
+                    # as the real apply_rf_transform_to_points() call.
+                    frame_locations = entry["final_locations"].copy()
+
+                else:
+                    # --------------------------------------------------------
+                    # Rotation interpolation
+                    #
+                    # object_rotation supports as_rotvec()/from_rotvec().
+                    # Scaling the rotation vector gives identity at t=0 and
+                    # the real object rotation at t=1.
+                    # --------------------------------------------------------
+                    rotation_type = type(object_rotation)
+
+                    partial_rotation = rotation_type.from_rotvec(
+                        object_rotation.as_rotvec()
+                        * transform_t
+                    )
+
+                    # --------------------------------------------------------
+                    # Translation interpolation
+                    #
+                    # At t=0:
+                    #
+                    #   partial_location_rel_model
+                    #       == object_location_rel_body
+                    #
+                    # Combined with identity rotation, the RF transform returns
+                    # the original point coordinates.
+                    #
+                    # At t=1:
+                    #
+                    #   partial_location_rel_model
+                    #       == real location_rel_model
+                    #
+                    # so this becomes the exact transform used by Janus.
+                    # --------------------------------------------------------
+                    partial_location_rel_model = (
+                        (1.0 - transform_t)
+                        * object_location_rel_body
+                        + transform_t
+                        * location_rel_model
+                    )
+
+                    frame_locations, _frame_features = (
+                        apply_rf_transform_to_points(
+                            locations=locations.copy(),
+                            features=copy.deepcopy(
+                                entry["features"]
+                            ),
+                            location_rel_model=(
+                                partial_location_rel_model
+                            ),
+                            object_location_rel_body=(
+                                object_location_rel_body.copy()
+                            ),
+                            object_rotation=partial_rotation,
+                        )
+                    )
+
+                    frame_locations = np.asarray(
+                        frame_locations,
+                        dtype=float,
+                    )
+
+                frame_source_points[source_graph_id] = (
+                    frame_locations
+                )
+
+            self._memory.update_merge_animation(
+                source_points=frame_source_points,
+                progress=overall_t,
+                merged_alpha=merged_alpha,
+            )
+
+            self.fig.canvas.draw_idle()
+            self.fig.canvas.flush_events()
+
+            # 40 frames × 25 ms ≈ one-second animation.
+            # self.fig.canvas.start_event_loop(0.025)
+            self.fig.canvas.start_event_loop(0.01)
 
     def awaits_choice(self, proposed: list[Action]) -> bool:
         """Whether the user should choose this step's action.
@@ -324,15 +692,20 @@ class LivePlotter(Plotter):
 
     def close(self) -> None:
         """Close the final figure and drop widget references."""
+        self._remove_merge_animation_hooks()
+
         if self.fig is not None:
             plt.close(self.fig)
             self.fig = None
+
         if self._controls is not None:
             self._controls.close()
+
         self._selector = None
         self._simulator = None
         self._monty = None
         self._details = None
+        self._memory = None
 
     def _draw_training(self) -> None:
         """Draw the exploratory-step panels from the LM buffer.

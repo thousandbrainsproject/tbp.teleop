@@ -1,6 +1,9 @@
 # @package experiment.config.step_hook
 _target_: tbp.teleop.default.Default
 plotter:
-  _target_: tbp.teleop.live_plotter.LivePlotter
+  _target_: tbp.teleop.web_plotter.WebPlotter
   interactive: false
   max_delay: 2.0
+  host: 127.0.0.1
+  port: 0
+  open_browser: true

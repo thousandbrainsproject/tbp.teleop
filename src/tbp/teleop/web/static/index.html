@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Monty Live</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-cluster">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div>
+          <div class="brand-title">Monty Live</div>
+          <div class="brand-subtitle" id="experiment-mode">Waiting for Monty</div>
+        </div>
+      </div>
+      <div class="topbar-center">
+        <label class="select-field">
+          <span>Learning module</span>
+          <select id="lm-select" disabled></select>
+        </label>
+        <label class="select-field">
+          <span>Input channel</span>
+          <select id="channel-select" disabled></select>
+        </label>
+      </div>
+      <div class="status-cluster">
+        <div class="status-pill" id="phase-pill"><i></i><span>Idle</span></div>
+        <div class="step-readout"><span>Step</span><strong id="step-value">—</strong></div>
+        <div class="connection" id="connection" title="WebSocket connection"><i></i><span>Connecting</span></div>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="column sensorium" aria-labelledby="sensorium-heading">
+        <div class="section-kicker"><span>01</span><h1 id="sensorium-heading">Sensorium</h1></div>
+        <article class="panel image-panel">
+          <div class="panel-head">
+            <div><h2>View finder</h2><p id="sensor-source">No sensor selected</p></div>
+            <span class="tiny-badge" id="outline-badge">standby</span>
+          </div>
+          <div class="image-stage wide"><canvas id="view-finder"></canvas><div class="empty-state" id="view-empty">Awaiting frame</div></div>
+        </article>
+
+        <article class="panel patch-panel">
+          <div class="panel-head"><div><h2>RGB patch</h2><p>Live sensor crop</p></div><span class="key-hint">WASD</span></div>
+          <div class="patch-control-grid">
+            <button class="direction up" data-action="up" aria-label="Move up">↑</button>
+            <button class="direction left" data-action="left" aria-label="Move left">←</button>
+            <div class="image-stage patch"><canvas id="rgb-patch"></canvas><div class="empty-state" id="patch-empty">No patch</div></div>
+            <button class="direction right" data-action="right" aria-label="Move right">→</button>
+            <button class="direction down" data-action="down" aria-label="Move down">↓</button>
+          </div>
+          <div class="choice-note" id="choice-note">Automatic policy step</div>
+        </article>
+      </section>
+
+      <section class="column cognition" aria-labelledby="cognition-heading">
+        <div class="section-kicker"><span>02</span><h1 id="cognition-heading">Monty</h1></div>
+        <article class="panel hero-panel">
+          <div class="panel-head hero-head">
+            <div><h2 id="monty-title">Representation</h2><p id="monty-caption">Waiting for a frame</p></div>
+            <div class="hero-actions"><button id="reset-camera" class="ghost-button" type="button">Reset view</button></div>
+          </div>
+          <div id="monty-viz" class="viz-host hero-viz"></div>
+          <aside class="feature-float" aria-labelledby="feature-title">
+            <div class="feature-label" id="feature-title">Input feature</div>
+            <div id="monty-feature" class="feature-host"></div>
+          </aside>
+        </article>
+        <div id="extras" class="extras-grid"></div>
+      </section>
+
+      <section class="column diagnostics" aria-labelledby="diagnostics-heading">
+        <div class="section-kicker"><span>03</span><h1 id="diagnostics-heading">Details</h1></div>
+        <div id="details-viz" class="details-host"></div>
+      </section>
+    </main>
+
+    <footer class="control-dock">
+      <div class="dock-status">
+        <span class="eyebrow">Control</span>
+        <strong id="control-mode">Monitor</strong>
+        <span id="control-description">Browser is observing the model.</span>
+      </div>
+      <div id="monitor-controls" class="dock-control">
+        <button id="pause-toggle" class="icon-button" type="button" aria-label="Pause or resume">Ⅱ</button>
+        <label class="slider-field grow"><span>Speed</span><input id="speed-slider" type="range" min="0" max="1" step="0.01" value="1"><output id="speed-output">100%</output></label>
+      </div>
+      <div id="interactive-controls" class="dock-control hidden">
+        <label class="slider-field grow"><span>Step multiplier</span><input id="step-slider" type="range" min="0.1" max="3" step="0.05" value="1"><output id="step-output">1.00×</output></label>
+        <button id="jump-button" class="secondary-button hidden" type="button">Jump <kbd>Space</kbd></button>
+        <button id="end-button" class="danger-button" type="button" disabled>End episode <kbd>Del</kbd></button>
+      </div>
+      <div class="latency-cell"><span>Transport</span><strong>local · WS</strong></div>
+    </footer>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

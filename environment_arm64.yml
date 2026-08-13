@@ -57,5 +57,5 @@ dependencies:
       - omegaconf>=2.3.0
       - pydantic>=2.10.6
       - typing-extensions
-      - -e ../tbp.monty
+      - -e ../feat.janus
       - -e .[dev]
