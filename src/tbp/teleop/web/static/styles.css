@@ -236,3 +236,51 @@ kbd { margin-left: 5px; color: var(--muted); font: 9px ui-monospace, SFMono-Regu
 .mini-viz .canvas-wrap { min-height: 145px; }
 .mini-viz .projection-row { height: 62px; gap: 4px; }
 .mini-viz .legend { max-width: 86%; left: 7px; bottom: 7px; }
+
+/*
+ * Temporary visualization used while one Memory model physically
+ * travels from its source thumbnail into the merge target.
+ */
+.memory-merge-flyer {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
+
+  /*
+   * Flyer is already destination-sized.
+   * Animation only changes translation + opacity.
+   */
+  transform-origin: top left;
+
+  /*
+   * Keep this fast: transform/opacity stay on the compositor.
+   */
+  will-change: transform, opacity;
+}
+
+
+.memory-merge-model-flyer {
+  position: fixed;
+
+  /*
+   * Above the Memory cards while travelling.
+   */
+  z-index: 50;
+
+  /*
+   * Completely transparent except for whatever gets drawn
+   * into the canvas.
+   */
+  background: transparent;
+
+  border: 0;
+  box-shadow: none;
+
+  pointer-events: none;
+
+  /*
+   * We only translate it across the page.
+   */
+  transform-origin: top left;
+  will-change: transform, opacity;
+}
