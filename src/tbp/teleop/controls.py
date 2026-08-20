@@ -301,7 +301,15 @@ class ActionButtons:
         scale = (
             self._step_slider.val if self._step_slider is not None else STEP_SCALE_INIT
         )
-        return self._policy.compute(ctx, selected, state, scale)
+        chosen = self._policy.compute(ctx, selected, state, scale)
+
+        # The model already recorded the action it proposed for this step, which the
+        # environment will never execute. Replace it with the user's choice so the
+        # policy and the logged action sequence describe what actually happened.
+        self._policy.feedback(chosen)
+        self.model.motor_system.action_sequence[-1] = (chosen, state)
+
+        return chosen
 
     def close(self) -> None:
         """Drop the button and slider references."""
