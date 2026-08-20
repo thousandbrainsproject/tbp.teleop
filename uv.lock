@@ -6909,7 +6909,7 @@ wheels = [
 
 [[package]]
 name = "tbp-monty"
-source = { editable = "../feat.janus" }
+source = { editable = "../feat.comp_benefits_figures" }
 dependencies = [
     { name = "eval-type-backport" },
     { name = "hydra-core" },
@@ -7105,8 +7105,8 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = "==3.0.0" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = "==2.5.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.14.2" },
-    { name = "tbp-monty", editable = "../feat.janus" },
-    { name = "tbp-monty", extras = ["simulator-mujoco"], marker = "extra == 'simulator-mujoco'", editable = "../feat.janus" },
+    { name = "tbp-monty", editable = "../feat.comp_benefits_figures" },
+    { name = "tbp-monty", extras = ["simulator-mujoco"], marker = "extra == 'simulator-mujoco'", editable = "../feat.comp_benefits_figures" },
     { name = "types-pyyaml", marker = "extra == 'dev'" },
     { name = "typing-extensions" },
 ]
