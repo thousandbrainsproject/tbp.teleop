@@ -417,7 +417,7 @@ class EvidenceHistory:
             lm: The learning module whose current state is recorded.
             step: The index of the current step within the episode.
         """
-        mlh = lm.get_current_mlh()
+        mlh = lm._get_current_mlh()
         if not mlh or mlh.get("graph_id") == "no_observations_yet":
             return
 
@@ -618,30 +618,61 @@ class ChannelView:
                     return sm, channel
         return None, None
 
-    @staticmethod
-    def channel_points(
-        locations: npt.NDArray[np.float64],
-    ) -> npt.NDArray[np.float64]:
-        """Return the non-NaN-padded location rows for one buffer channel.
+    def channel_valid_mask(self, channel: str) -> npt.NDArray[np.bool_] | None:
+        """Return the global buffer rows where `channel` contributed features.
+
+        The buffer stores a single global location per step (the mean of the sensor
+        module locations) but pads each channel's features lazily, so a channel's
+        feature arrays may be shorter than the global location array and must be padded
+        to the buffer length before masking. The `on_object` feature is written for a
+        channel on exactly the steps it contributed features, so its non-NaN rows are
+        the channel's valid rows.
 
         Args:
-            locations: The padded `(N, 3)` location buffer for a single channel.
+            channel: The buffer input channel to read.
 
         Returns:
-            The `(M, 3)` rows whose first coordinate is not NaN, or an empty `(0, 3)`
-            array when the buffer is empty or not yet shaped.
+            A length-`N` boolean mask over the global locations, or `None` when the
+            channel has no features yet or the padded mask cannot be aligned.
         """
-        if locations.ndim != 2 or locations.shape[0] == 0 or locations.shape[1] < 3:
+        channel_feats = self.lm.buffer.features.get(channel)
+        if not channel_feats or "on_object" not in channel_feats:
+            return None
+        padded = self.lm.buffer._pad_to_target_length(
+            np.asarray(channel_feats["on_object"], dtype=float)
+        )
+        if padded.ndim != 2 or padded.shape[0] != self.lm.buffer.locations.shape[0]:
+            return None
+        return ~np.isnan(padded[:, 0])
+
+    def channel_points(self, channel: str) -> npt.NDArray[np.float64]:
+        """Return the global location rows where `channel` contributed features.
+
+        The buffer stores one global location per step, so a channel's point cloud is
+        the global locations masked to the steps that channel was active (see
+        `channel_valid_mask`).
+
+        Args:
+            channel: The buffer input channel to read.
+
+        Returns:
+            The `(M, 3)` rows for the channel's valid steps, or an empty `(0, 3)` array
+            when the channel has no observations yet or the buffer is not yet shaped.
+        """
+        locations = np.asarray(self.lm.buffer.locations, dtype=float)
+        mask = self.channel_valid_mask(channel)
+        if mask is None or locations.ndim != 2 or locations.shape[1] < 3:
             return np.empty((0, 3))
-        return locations[~np.isnan(locations[:, 0])]
+        return locations[mask]
 
     def aligned_feature(
         self, channel: str, attr: str
     ) -> npt.NDArray[np.float64] | None:
         """Return one buffer feature aligned row-for-row with a channel's valid points.
 
-        The buffer pads every per-channel feature to the location length, so the rows
-        kept by `channel_points` (non-NaN location) index the feature identically.
+        The feature is padded to the global location length and masked by the same
+        `channel_valid_mask` used by `channel_points`, so the returned rows index the
+        channel's points identically.
 
         Args:
             channel: The buffer input channel to read.
@@ -654,11 +685,15 @@ class ChannelView:
         channel_feats = self.lm.buffer.features.get(channel)
         if not channel_feats or attr not in channel_feats:
             return None
-        arr = np.asarray(channel_feats[attr], dtype=float)
-        locations = np.asarray(self.lm.buffer.locations[channel])
-        if arr.ndim != 2 or arr.shape[0] != locations.shape[0]:
+        mask = self.channel_valid_mask(channel)
+        if mask is None:
             return None
-        valid = arr[~np.isnan(locations[:, 0])]
+        arr = self.lm.buffer._pad_to_target_length(
+            np.asarray(channel_feats[attr], dtype=float)
+        )
+        if arr.ndim != 2 or arr.shape[0] != mask.shape[0]:
+            return None
+        valid = arr[mask]
         if valid.size == 0 or np.isnan(valid).any():
             return None
         return valid
@@ -914,7 +949,7 @@ class FeatureInset:
         source_lm = self.channel_view.resolve_lm_channel(channel)
         name = "-"
         if source_lm is not None:
-            mlh = source_lm.get_current_mlh()
+            mlh = source_lm._get_current_mlh()
             graph_id = mlh.get("graph_id") if mlh else None
             if graph_id and graph_id != "no_observations_yet":
                 name = str(graph_id)
