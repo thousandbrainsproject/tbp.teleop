@@ -72,7 +72,7 @@ override-dependencies = ["opencv-python ; sys_platform == 'never'"]
 [tool.uv.sources]
 # Monty is not published to PyPI; point at a local checkout. This is the uv
 # counterpart to the `-e ../tbp.monty` entry in `environment[_arm64].yml`.
-"tbp.monty" = { path = "../feat.janus", editable = true }
+"tbp.monty" = { path = "../feat.comp_benefits_figures", editable = true }
 
 [tool.uv.extra-build-dependencies]
 # torch-scatter and torch-sparse are sdist-only and import torch while building.

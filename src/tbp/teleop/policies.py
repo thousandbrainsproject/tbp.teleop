@@ -261,3 +261,25 @@ def interactive_policy_for(model: Monty) -> InteractivePolicy:
     if isinstance(policy, (BasePolicy, InformedPolicyRandomWalk)):
         return SampledInteractivePolicy(policy)
     raise ValueError(f"Interactive plotter has no adapter for {type(policy).__name__}.")
+
+
+def goal_driven(model: Monty) -> bool:
+    """Whether the model's proposed actions this step enact a goal.
+
+    Reads the policy selector's telemetry for the policy that produced this step's
+    actions. With a `DistantPolicySelector` that is any policy other than the default
+    fall-back: `JumpToGoal` for a learning module's goal (including the undo of a
+    previous jump) or `LookAtGoal` for a sensor module's goal. A `SinglePolicySelector`
+    hands its goals to a policy that ignores them, so nothing is ever goal-driven.
+
+    Args:
+        model: The Monty model whose motor system exposes the policy selector.
+
+    Returns:
+        True when the step's actions were chosen by a goal-driven policy.
+    """
+    policy_selector = model.motor_system._policy_selector
+    if not isinstance(policy_selector, DistantPolicySelector):
+        return False
+    selected = policy_selector._selected_policies
+    return bool(selected) and selected[-1] is not policy_selector._default

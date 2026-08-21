@@ -13,13 +13,13 @@ from typing import TYPE_CHECKING, Callable, ClassVar
 
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button, Slider
-from tbp.monty.frameworks.actions.actions import SetAgentPose
 
 from tbp.teleop.policies import (
     HEADINGS,
     STEP_SCALE_INIT,
     STEP_SCALE_MAX,
     STEP_SCALE_MIN,
+    goal_driven,
     interactive_policy_for,
 )
 
@@ -46,8 +46,9 @@ class ActionButtons:
     that can act this step are shown rather than greyed out. The four exploration
     headings (up / down / left / right) wrap around the RGB patch as a D-pad, each
     pointing the way it moves the sensor. A centered "jump" button appears whenever the
-    model proposes a hypothesis-testing jump, and a centered "End episode" button is
-    always present.
+    model's proposed actions enact a goal (a learning module's hypothesis-testing jump
+    or a sensor module's look-at target) and executes them unchanged; a centered "End
+    episode" button is always present.
 
     `override_action` blocks on the figure's event loop until a button is clicked or its
     keyboard shortcut is pressed (WASD or arrow keys for the headings, space for jump,
@@ -123,24 +124,28 @@ class ActionButtons:
             fig.canvas.mpl_disconnect(manager.key_press_handler_id)
         fig.canvas.mpl_connect("key_press_event", self._on_key)
 
-    @staticmethod
-    def _is_jump(proposed: list[Action]) -> bool:
-        """Whether the model proposes a hypothesis-testing jump this step.
+    def _goal_step(self, proposed: list[Action]) -> bool:
+        """Whether the model's proposed actions enact a goal this step.
+
+        Any goal counts, whoever proposed it: a learning module's hypothesis-testing
+        jump (or the undo of one) and a sensor module's look-at target alike. Read from
+        the motor system's policy selection rather than the action types, so it does not
+        depend on what actions a goal-driven policy happens to emit.
 
         Args:
             proposed: The actions the model computed for this step.
 
         Returns:
-            True when the proposed actions begin with a `SetAgentPose` teleport.
+            True when a goal-driven policy produced a non-empty `proposed`.
         """
-        return bool(proposed) and isinstance(proposed[0], SetAgentPose)
+        return bool(proposed) and goal_driven(self.model)
 
     def awaits_choice(self, proposed: list[Action]) -> bool:
         """Whether the user should choose this step's action.
 
-        A jump is always a choice point so the user can accept it or move instead;
-        otherwise the wrapped policy decides (e.g. the surface policy's tangential
-        step).
+        A goal-driven step is always a choice point so the user can accept the goal or
+        move instead; otherwise the wrapped policy decides (e.g. the surface policy's
+        tangential step).
 
         Args:
             proposed: The actions the model computed for this step.
@@ -148,7 +153,7 @@ class ActionButtons:
         Returns:
             True when this step is a user choice point.
         """
-        return self._is_jump(proposed) or self._policy.awaits_choice(proposed)
+        return self._goal_step(proposed) or self._policy.awaits_choice(proposed)
 
     def _rebuild(self, headings: list[str], specials: list[str]) -> None:
         """Replace the choice buttons: a D-pad around the patch, specials centered.
@@ -156,8 +161,8 @@ class ActionButtons:
         Args:
             headings: The exploration headings (up / down / left / right) to wrap
                 around the RGB patch as a D-pad.
-            specials: The centered buttons below the figure ("jump" when offered, then
-                "End episode"), in left-to-right order.
+            specials: The centered buttons below the figure ("jump" when a goal is
+                offered, then "End episode"), in left-to-right order.
         """
         for button in self._buttons.values():
             button.ax.remove()
@@ -266,12 +271,12 @@ class ActionButtons:
         """Draw this step's buttons, block until one is clicked, return its action.
 
         The buttons are the policy's headings wrapped around the patch, plus a "jump"
-        button when `proposed` is a hypothesis-testing jump, plus "End episode". The
+        button when `proposed` enacts a goal, plus "End episode". The
         wait is guarded on `self._selected`, so a pre-set selection skips the event
         loop entirely. Selector-button clicks repaint the figure without setting
         `self._selected`, so they do not end the wait. Clicking "jump" executes the
-        proposed jump unchanged; any other heading is computed by the interactive
-        policy from the current motor-system state.
+        proposed goal-driven actions unchanged; any other heading is computed by the
+        interactive policy from the current motor-system state.
 
         Args:
             ctx: The runtime context supplying the random state.
@@ -285,7 +290,7 @@ class ActionButtons:
                 that have not reached a terminal state to time_out so the episode logs
                 cleanly.
         """
-        specials = [JUMP, END_EPISODE] if self._is_jump(proposed) else [END_EPISODE]
+        specials = [JUMP, END_EPISODE] if self._goal_step(proposed) else [END_EPISODE]
         self._rebuild(list(HEADINGS), specials)
 
         while self._selected is None:
