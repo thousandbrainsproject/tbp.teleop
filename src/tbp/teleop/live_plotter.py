@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpecFromSubplotSpec
 from tbp.monty.frameworks.experiments.mode import ExperimentMode
 from tbp.monty.frameworks.models.no_reset_evidence_matching import (
     MontyForNoResetEvidenceGraphMatching,
@@ -29,8 +30,10 @@ from tbp.teleop.helpers import (
     is_interactive_backend,
 )
 from tbp.teleop.panels import (
+    AttentionPanel,
     DetailsPanel,
     MontyPanel,
+    SegmentationPanel,
     SimulatorPanel,
 )
 from tbp.teleop.plotter import Plotter
@@ -72,6 +75,13 @@ class LivePlotter(Plotter):
 
     When the displayed learning module lacks the evidence-LM inference API, the Monty
     and Details matching-step panels degrade to a placeholder rather than raising.
+
+    With `attention_vis` enabled, the three sections are compressed into a top row
+    (about half the figure height) and a second row is added along the bottom with two
+    attention-debugging panels: the `AttentionSystem`'s live voxel grid in 3D world
+    space, and the segmented region proposed by the model-free sensor module (e.g.
+    `SlicMerge`) overlaid on its camera view. To make room, the "Input Feature" inset
+    and the "Number of hypotheses per object" plot are dropped in this layout.
     """
 
     _channel_view: ChannelView
@@ -87,6 +97,7 @@ class LivePlotter(Plotter):
         min_delay: float = 0.001,
         max_delay: float = 2.0,
         figsize: tuple[float, float] = (16, 8),
+        attention_vis: bool = False,
     ) -> None:
         """Initialize the plotter.
 
@@ -96,6 +107,9 @@ class LivePlotter(Plotter):
             min_delay: Non-interactive pause in seconds at full speed.
             max_delay: Maximum non-interactive pause in seconds at the slowest speed.
             figsize: Figure size in inches.
+            attention_vis: Whether to add the bottom row with the attention voxel-grid
+                and segmented-region panels (dropping the feature inset and the
+                hypotheses plot to make room).
         """
         # Turn interactive plotting off so the plotter controls when figures are
         # drawn and when execution blocks, via its own canvas event loop.
@@ -105,6 +119,7 @@ class LivePlotter(Plotter):
         self.min_delay = min_delay
         self.max_delay = max_delay
         self.figsize = figsize
+        self.attention_vis = attention_vis
 
         self.fig = None
         self._controls = None
@@ -199,10 +214,45 @@ class LivePlotter(Plotter):
         self.fig.subplots_adjust(
             bottom=0.16, top=0.9, left=0.04, right=0.97, wspace=0.25
         )
-        outer = self.fig.add_gridspec(1, 3)
-        self._sim_spec = outer[0, 0]
-        self._monty_spec = outer[0, 1]
-        self._details_spec = outer[0, 2]
+        if self.attention_vis:
+            # Two rows: the three regular sections on top at roughly half height, the
+            # attention voxel grid and segmented region along the bottom. The top
+            # margin is lowered (vs. the figure-wide 0.9) so the compressed top row's
+            # axis titles clear the selector buttons at 0.91.
+            outer = self.fig.add_gridspec(
+                2,
+                1,
+                height_ratios=[1.0, 0.95],
+                hspace=0.4,
+                top=0.86,
+                bottom=0.16,
+                left=0.04,
+                right=0.97,
+            )
+            top = GridSpecFromSubplotSpec(1, 3, subplot_spec=outer[0, 0], wspace=0.25)
+            bottom = GridSpecFromSubplotSpec(
+                1,
+                3 if self.interactive else 2,
+                subplot_spec=outer[1, 0],
+                wspace=0.25,
+            )
+            self._sim_spec = top[0, 0]
+            self._monty_spec = top[0, 1]
+            self._details_spec = top[0, 2]
+            if self.interactive:
+                # The interactive step-multiplier slider sits below the Simulator
+                # column's RGB patch, so the bottom-left third is left free for it and
+                # the two panels align under the Monty and Details columns.
+                self._attention_spec = bottom[0, 1]
+                self._segmentation_spec = bottom[0, 2]
+            else:
+                self._attention_spec = bottom[0, 0]
+                self._segmentation_spec = bottom[0, 1]
+        else:
+            outer = self.fig.add_gridspec(1, 3)
+            self._sim_spec = outer[0, 0]
+            self._monty_spec = outer[0, 1]
+            self._details_spec = outer[0, 2]
 
         self._simulator = SimulatorPanel(self.fig, self._sim_spec)
         self._monty = MontyPanel(self.fig, self._monty_spec, self._channel_view)
@@ -211,7 +261,16 @@ class LivePlotter(Plotter):
             self._details_spec,
             self._channel_view,
             self._history,
+            show_num_hypotheses=not self.attention_vis,
         )
+        if self.attention_vis:
+            self._attention = AttentionPanel(self.fig, self._attention_spec)
+            self._segmentation = SegmentationPanel(
+                self.fig, self._segmentation_spec, self.model
+            )
+        else:
+            self._attention = None
+            self._segmentation = None
         draw_section_dividers(
             self.fig, self._sim_spec, self._monty_spec, self._details_spec
         )
@@ -274,7 +333,11 @@ class LivePlotter(Plotter):
         else:
             self._draw_inference()
 
-        self._monty.draw_feature_inset()
+        if self.attention_vis:
+            self._attention.draw(self.model)
+            self._segmentation.draw()
+        else:
+            self._monty.draw_feature_inset()
 
         self.fig.canvas.draw_idle()
         self.fig.canvas.flush_events()
@@ -332,6 +395,8 @@ class LivePlotter(Plotter):
         self._simulator = None
         self._monty = None
         self._details = None
+        self._attention = None
+        self._segmentation = None
 
     def _draw_training(self) -> None:
         """Draw the exploratory-step panels from the LM buffer.

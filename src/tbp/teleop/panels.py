@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from tbp.monty.frameworks.agents import AgentID
     from tbp.monty.frameworks.models.abstract_monty_classes import (
         AgentObservations,
+        Monty,
         Observations,
         SensorModule,
     )
@@ -482,6 +483,7 @@ class DetailsPanel:
         spec,
         channel_view: ChannelView,
         history: EvidenceHistory,
+        show_num_hypotheses: bool = True,
     ) -> None:
         """Bind the Details column to its figure region and data sources.
 
@@ -490,11 +492,15 @@ class DetailsPanel:
             spec: The Details column's gridspec subplot spec.
             channel_view: The selected LM/channel and per-channel feature accessors.
             history: The per-LM evidence and hypothesis-count history.
+            show_num_hypotheses: Whether the inference view includes the
+                number-of-hypotheses line plot below the evidence plot (dropped by the
+                attention layout to free vertical space).
         """
         self.fig = fig
         self.spec = spec
         self.channel_view = channel_view
         self.history = history
+        self.show_num_hypotheses = show_num_hypotheses
         self._insets: dict[str, FeatureInset] = {}
         self._axes: list[Axes] = []
         self._proj_axes: list[list[Axes]] = []
@@ -533,7 +539,7 @@ class DetailsPanel:
             self._insets[channel].draw(channel, rect)
 
     def draw_inference(self) -> None:
-        """Draw the displayed LM's evidence and hypothesis-count line plots."""
+        """Draw the displayed LM's evidence (and optional hypothesis-count) plots."""
         self._select_active_history()
         self._ensure_lines()
         self._draw_object_series(
@@ -542,12 +548,13 @@ class DetailsPanel:
             "Highest evidence per object",
             "evidence",
         )
-        self._draw_object_series(
-            self._num_hyp_ax,
-            self._num_hyp_history,
-            "Number of hypotheses per object",
-            "hypotheses",
-        )
+        if self.show_num_hypotheses:
+            self._draw_object_series(
+                self._num_hyp_ax,
+                self._num_hyp_history,
+                "Number of hypotheses per object",
+                "hypotheses",
+            )
         self._draw_inference_legend()
 
     def draw_placeholder(self, message: str) -> None:
@@ -640,23 +647,36 @@ class DetailsPanel:
         self._channel_count = n
 
     def _ensure_lines(self) -> None:
-        """Rebuild the column as two line plots with the legend between them."""
+        """Rebuild the column as the line plot(s) with the legend below/between them."""
         if self._mode == "lines":
             return
         self._clear_insets()
         self._clear_axes()
-        grid = GridSpecFromSubplotSpec(
-            3,
-            1,
-            subplot_spec=self.spec,
-            height_ratios=[1, 0.5, 1],
-            hspace=0.4,
-        )
-        self._evidence_ax = self.fig.add_subplot(grid[0, 0])
-        self._legend_ax = self.fig.add_subplot(grid[1, 0])
+        if self.show_num_hypotheses:
+            grid = GridSpecFromSubplotSpec(
+                3,
+                1,
+                subplot_spec=self.spec,
+                height_ratios=[1, 0.5, 1],
+                hspace=0.4,
+            )
+            self._evidence_ax = self.fig.add_subplot(grid[0, 0])
+            self._legend_ax = self.fig.add_subplot(grid[1, 0])
+            self._num_hyp_ax = self.fig.add_subplot(grid[2, 0])
+            self._axes = [self._evidence_ax, self._legend_ax, self._num_hyp_ax]
+        else:
+            grid = GridSpecFromSubplotSpec(
+                2,
+                1,
+                subplot_spec=self.spec,
+                height_ratios=[1, 0.45],
+                hspace=0.5,
+            )
+            self._evidence_ax = self.fig.add_subplot(grid[0, 0])
+            self._legend_ax = self.fig.add_subplot(grid[1, 0])
+            self._num_hyp_ax = None
+            self._axes = [self._evidence_ax, self._legend_ax]
         self._legend_ax.set_axis_off()
-        self._num_hyp_ax = self.fig.add_subplot(grid[2, 0])
-        self._axes = [self._evidence_ax, self._legend_ax, self._num_hyp_ax]
         self._mode = "lines"
         self._channel_count = None
 
@@ -702,16 +722,16 @@ class DetailsPanel:
         ax.set_ylabel(ylabel)
 
     def _draw_inference_legend(self) -> None:
-        """Place the shared per-object legend between the two line plots.
+        """Place the shared per-object legend beneath the evidence plot.
 
         The legend would otherwise run off the figure's right edge, so it is drawn in a
-        dedicated axis squeezed between the evidence and hypotheses plots, with the
-        handles gathered from the line plots.
+        dedicated axis below the evidence plot (and above the hypotheses plot when that
+        is shown), with the handles gathered from the evidence plot.
         """
         if self._inference_legend is not None:
             self._inference_legend.remove()
             self._inference_legend = None
-        handles, labels = self._num_hyp_ax.get_legend_handles_labels()
+        handles, labels = self._evidence_ax.get_legend_handles_labels()
         if not handles:
             return
         self._inference_legend = self._legend_ax.legend(
@@ -721,4 +741,232 @@ class DetailsPanel:
             ncol=2,
             fontsize=10,
             borderaxespad=0.0,
+        )
+
+
+class AttentionPanel:
+    """The attention section: the `AttentionSystem`'s live voxel grid in 3D space.
+
+    Draws the attention system's persistent sparse voxel grid as a 3D scatter of voxel
+    centers in world coordinates, colored by each voxel's attention weight. Because the
+    grid decays voxels that are not re-proposed and expires those that reach zero, the
+    color of a voxel doubles as a recency signal: bright voxels were proposed this step,
+    dim ones are decaying memories. The axis frame is the union of every extent seen so
+    far in the episode, so the view stays stable as attention moves.
+
+    The world frame is y-up with the camera looking roughly along the z axis, so the
+    grid is drawn with world x to the right, world y vertical, and world z as scene
+    depth, viewed nearly head-on to match how the object's surface faces the camera.
+
+    Shows a placeholder when the model has no real attention system (e.g. the
+    `NoopAttentionSystem`, which carries no voxel grid) or the grid is empty.
+    """
+
+    def __init__(self, fig: Figure, spec) -> None:
+        """Lay out the 3D voxel axis and its weight colorbar.
+
+        Args:
+            fig: The figure to draw on.
+            spec: The attention panel's gridspec subplot spec.
+        """
+        self.fig = fig
+        self._ax = fig.add_subplot(spec, projection="3d")
+        # A 3D axis renders its (equal-aspect) scene as a roughly square block centered
+        # in its cell, so the colorbar is pinned just right of that square rather than
+        # at the far cell edge.
+        cell = spec.get_position(fig)
+        fig_w, fig_h = fig.get_size_inches()
+        cell_w = cell.x1 - cell.x0
+        cell_h = cell.y1 - cell.y0
+        side_frac_x = min(cell_w * fig_w, cell_h * fig_h) / fig_w
+        cax_left = (cell.x0 + cell.x1) / 2 + side_frac_x / 2 + 0.02
+        cax_height = cell_h * 0.65
+        cax_bottom = cell.y0 + (cell_h - cax_height) / 2
+        self._cax = fig.add_axes([cax_left, cax_bottom, 0.008, cax_height])
+        # Weights live in [0, MAX_ATTENTION_WEIGHT] (= 1.0) and decay toward zero, so a
+        # fixed norm keeps colors comparable across steps and the colorbar static.
+        # Negative (inhibitory) weights clip to the lowest color.
+        self._norm = plt.Normalize(0.0, 1.0)
+        self._cmap = plt.get_cmap("viridis")
+        self.fig.colorbar(
+            plt.cm.ScalarMappable(norm=self._norm, cmap=self._cmap), cax=self._cax
+        )
+        self._cax.set_ylabel("attention weight", fontsize=8)
+        self._cax.tick_params(labelsize=7)
+        self._bounds: tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]] | None = (
+            None
+        )
+
+    def draw(self, model: Monty) -> None:
+        """Draw the current voxel grid, or a placeholder when there is none.
+
+        Args:
+            model: The Monty model whose attention system is read.
+        """
+        attention = getattr(model, "attention_system", None)
+        grid = getattr(attention, "voxel_grid", None)
+        if grid is None:
+            self._draw_placeholder("no attention system")
+            return
+        data = grid.to_pandas()
+        if len(data) == 0:
+            self._draw_placeholder("voxel grid empty")
+            return
+
+        # Voxel indices are the lower corners in units of voxel_size; +0.5 centers.
+        voxels = data.index.to_frame(index=False).to_numpy(dtype=float)
+        centers = (voxels + 0.5) * grid.voxel_size
+        weights = data["weight"].to_numpy(dtype=float)
+
+        ax = self._ax
+        ax.cla()
+        ax.set_axis_on()
+        # Plot axes are (world x, world z, world y) so world-up is vertical and world z
+        # is depth; the near-head-on view then matches the camera's perspective.
+        ax.scatter(
+            centers[:, 0],
+            centers[:, 2],
+            centers[:, 1],
+            c=self._cmap(self._norm(weights)),
+            marker="s",
+            s=8,
+            depthshade=False,
+        )
+        ax.set_title(f"Attention voxel grid ({len(data)} voxels)")
+
+        center, half = self._frame(centers)
+        ax.set_xlim(center[0] - half, center[0] + half)
+        ax.set_ylim(center[2] - half, center[2] + half)
+        ax.set_zlim(center[1] - half, center[1] + half)
+        ax.set_box_aspect((1, 1, 1))
+        ax.view_init(elev=8, azim=-82)
+        ax.tick_params(labelsize=6)
+        # The depth (world z) axis is nearly edge-on in the head-on view, so its tick
+        # labels would render as unreadable overlapping text.
+        ax.set_yticks([])
+
+    def _frame(
+        self, centers: npt.NDArray[np.float64]
+    ) -> tuple[npt.NDArray[np.float64], float]:
+        """Return a stable cubic frame enclosing every voxel seen this episode.
+
+        The bounds only ever grow, so the view doesn't jump around as voxels decay and
+        expire.
+
+        Args:
+            centers: The `(V, 3)` world-frame voxel centers drawn this step.
+
+        Returns:
+            The frame's per-axis center and half side length.
+        """
+        low = centers.min(axis=0)
+        high = centers.max(axis=0)
+        if self._bounds is None:
+            self._bounds = (low, high)
+        else:
+            self._bounds = (
+                np.minimum(self._bounds[0], low),
+                np.maximum(self._bounds[1], high),
+            )
+        low, high = self._bounds
+        center = (low + high) / 2
+        half = max(float((high - low).max()) / 2, 0.01)
+        return center, half
+
+    def _draw_placeholder(self, message: str) -> None:
+        """Show a centered message in place of the voxel scatter.
+
+        Args:
+            message: The text to display.
+        """
+        ax = self._ax
+        ax.cla()
+        ax.set_axis_off()
+        ax.text2D(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes)
+
+
+class SegmentationPanel:
+    """The segmentation section: the model-free SM's segmented region over its view.
+
+    Finds the sensor module carrying a segmentation strategy (e.g. `SlicMerge` on a
+    `SalienceSM`) and reads the 2D segmentation mask and matching camera snapshot the
+    module recorded in its telemetry, so the overlay shows exactly the mask Monty acted
+    on. The panel shows the camera image with everything outside the segmented region
+    dimmed, the region boundary outlined, and the fixation point (image center) marked.
+
+    The sensor module only records telemetry when configured with `save_raw_obs=true`,
+    so the panel explains that requirement instead of drawing when it is off. It
+    likewise shows a placeholder when no sensor module has a segmentation strategy.
+    """
+
+    def __init__(self, fig: Figure, spec, model: Monty) -> None:
+        """Bind the panel to its axis and resolve the segmenting sensor module.
+
+        Args:
+            fig: The figure to draw on.
+            spec: The segmentation panel's gridspec subplot spec.
+            model: The Monty model whose sensor modules are searched for a
+                segmentation strategy.
+        """
+        self.fig = fig
+        self._ax = fig.add_subplot(spec)
+        self._sm = next(
+            (
+                sm
+                for sm in model.sensor_modules
+                if getattr(sm, "_segmentation_strategy", None) is not None
+            ),
+            None,
+        )
+
+    def draw(self) -> None:
+        """Draw the segmented-region overlay recorded for the most recent step."""
+        ax = self._ax
+        ax.cla()
+        ax.set_axis_off()
+        if self._sm is None:
+            self._draw_placeholder("no segmentation strategy configured")
+            return
+        if not getattr(self._sm, "_save_raw_obs", False):
+            self._draw_placeholder(
+                "Segmentation view disabled:\n"
+                f"set save_raw_obs=true on sensor module "
+                f"{self._sm.sensor_module_id!r}\nso it records its segmentation maps"
+            )
+            return
+        telemetry = self._sm._snapshot_telemetry
+        if not telemetry.segmentation_maps or not telemetry.raw_observations:
+            self._draw_placeholder("no segmentation recorded yet")
+            return
+
+        mask = telemetry.segmentation_maps[-1]
+        rgba = np.asarray(telemetry.raw_observations[-1]["rgba"])
+        strategy_name = type(self._sm._segmentation_strategy).__name__
+        ax.set_title(
+            f"Segmented region ({strategy_name} on {self._sm.sensor_module_id})"
+        )
+        ax.imshow(rgba)
+        if mask is not None:
+            dim = np.zeros((*mask.shape, 4))
+            dim[mask == 0] = (0.0, 0.0, 0.0, 0.55)
+            ax.imshow(dim)
+            ax.contour(mask, levels=[0.5], colors="cyan", linewidths=1.2)
+        # The segmentation strategies fixate at the image center.
+        h, w = rgba.shape[:2]
+        ax.plot(w // 2, h // 2, "+", color="red", markersize=10, markeredgewidth=2)
+
+    def _draw_placeholder(self, message: str) -> None:
+        """Show a centered message in place of the overlay.
+
+        Args:
+            message: The text to display.
+        """
+        self._ax.text(
+            0.5,
+            0.5,
+            message,
+            ha="center",
+            va="center",
+            wrap=True,
+            transform=self._ax.transAxes,
         )

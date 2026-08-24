@@ -4,3 +4,4 @@ plotter:
   _target_: tbp.teleop.live_plotter.LivePlotter
   interactive: false
   max_delay: 2.0
+  attention_vis: false

@@ -3,3 +3,4 @@ _target_: tbp.teleop.default.Default
 plotter:
   _target_: tbp.teleop.live_plotter.LivePlotter
   interactive: true
+  attention_vis: false
