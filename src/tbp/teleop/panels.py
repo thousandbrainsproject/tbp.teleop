@@ -882,7 +882,8 @@ class AttentionPanel:
         # diverging norm keeps colors comparable across steps and the colorbar static,
         # with red excitation and blue inhibition meeting at (near-white) zero.
         self._norm = plt.Normalize(-1.0, 1.0)
-        self._cmap = plt.get_cmap("coolwarm")
+        self._cmap = plt.get_cmap("cividis")
+
         self.fig.colorbar(
             plt.cm.ScalarMappable(norm=self._norm, cmap=self._cmap), cax=self._cax
         )
@@ -926,7 +927,7 @@ class AttentionPanel:
             c=self._cmap(self._norm(weights)),
             marker="s",
             s=8,
-            alpha=0.1,
+            alpha=0.4,
             depthshade=False,
         )
         ax.set_title(f"Attention voxel grid ({len(data)} voxels)")
