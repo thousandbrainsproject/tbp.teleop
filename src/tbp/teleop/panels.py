@@ -918,7 +918,7 @@ class AttentionPanel:
             c=self._cmap(self._norm(weights)),
             marker="s",
             s=8,
-            alpha=0.45,
+            alpha=0.1,
             depthshade=False,
         )
         ax.set_title(f"Attention voxel grid ({len(data)} voxels)")
@@ -1033,8 +1033,12 @@ class AttentionPanel:
             The scatter keyword arguments for the group.
         """
         if sender_type == "SM":
-            marker = {"marker": "*", "s": 14} if passed else {"marker": "x", "s": 10}
-            return {**marker, "color": "hotpink", "alpha": 0.45, "linewidths": 1.0}
+            marker = (
+                {"marker": "*", "s": 4, "color": "green"}
+                if passed
+                else {"marker": "x", "s": 2, "color": "hotpink"}
+            )
+            return {**marker, "alpha": 0.2, "linewidths": 0.5}
         if passed:
             return {"marker": "*", "s": 35, "color": "green"}
         return {"marker": "x", "s": 30, "color": "red", "linewidths": 1.5}
