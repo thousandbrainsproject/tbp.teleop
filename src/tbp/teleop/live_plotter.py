@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpecFromSubplotSpec
 from tbp.monty.frameworks.experiments.mode import ExperimentMode
 from tbp.monty.frameworks.models.no_reset_evidence_matching import (
     MontyForNoResetEvidenceGraphMatching,
@@ -22,6 +23,7 @@ from tbp.teleop.controls import (
     SelectorBar,
     SpeedSlider,
 )
+from tbp.teleop.goals import JumpWatcher, goal_status
 from tbp.teleop.helpers import (
     ChannelView,
     EvidenceHistory,
@@ -29,8 +31,10 @@ from tbp.teleop.helpers import (
     is_interactive_backend,
 )
 from tbp.teleop.panels import (
+    AttentionPanel,
     DetailsPanel,
     MontyPanel,
+    SegmentationPanel,
     SimulatorPanel,
 )
 from tbp.teleop.plotter import Plotter
@@ -43,6 +47,10 @@ if TYPE_CHECKING:
         Monty,
         Observations,
     )
+
+
+# How many steps a failed-jump banner stays visible after the move-back step.
+FAILED_JUMP_BANNER_STEPS = 5
 
 
 class LivePlotter(Plotter):
@@ -72,6 +80,23 @@ class LivePlotter(Plotter):
 
     When the displayed learning module lacks the evidence-LM inference API, the Monty
     and Details matching-step panels degrade to a placeholder rather than raising.
+
+    With `attention_vis` enabled, the three sections are compressed into a top row
+    and a taller second row is added along the bottom with two attention-debugging
+    panels: the `AttentionSystem`'s live voxel grid in 3D world space (rotatable by
+    dragging and zoomable with the mouse wheel), and the segmented region proposed by
+    the model-free sensor module (e.g. `SlicMerge`) overlaid on its camera view. To
+    make room, the "Input Feature" inset and the "Number of hypotheses per object"
+    plot are dropped in this layout.
+
+    Goals emitted by SMs and LMs are surfaced in several ways: a status line in the
+    top-left corner names the enacted goal's action and source module each step; with
+    `attention_vis` enabled, the attention panel overlays every proposed goal on the
+    voxel grid, styled by whether it fell within the active attention space; the
+    matching-step MLH view marks the displayed LM's current goal target on the
+    hypothesized model; and a red top-right banner reports for a few steps when a
+    goal was unsuccessful because no object was visible at its location and Monty
+    moved back.
     """
 
     _channel_view: ChannelView
@@ -87,6 +112,7 @@ class LivePlotter(Plotter):
         min_delay: float = 0.001,
         max_delay: float = 2.0,
         figsize: tuple[float, float] = (16, 8),
+        attention_vis: bool = False,
     ) -> None:
         """Initialize the plotter.
 
@@ -96,6 +122,9 @@ class LivePlotter(Plotter):
             min_delay: Non-interactive pause in seconds at full speed.
             max_delay: Maximum non-interactive pause in seconds at the slowest speed.
             figsize: Figure size in inches.
+            attention_vis: Whether to add the bottom row with the attention voxel-grid
+                and segmented-region panels (dropping the feature inset and the
+                hypotheses plot to make room).
         """
         # Turn interactive plotting off so the plotter controls when figures are
         # drawn and when execution blocks, via its own canvas event loop.
@@ -105,6 +134,7 @@ class LivePlotter(Plotter):
         self.min_delay = min_delay
         self.max_delay = max_delay
         self.figsize = figsize
+        self.attention_vis = attention_vis
 
         self.fig = None
         self._controls = None
@@ -172,6 +202,9 @@ class LivePlotter(Plotter):
         self._last_observations = None
         self._last_step = None
         self._supervised_lm_ids = supervised_lm_ids
+        self._jump_watcher = JumpWatcher()
+        self._banner_message: str | None = None
+        self._banner_until: int | None = None
 
         self._build_figure()
 
@@ -199,10 +232,48 @@ class LivePlotter(Plotter):
         self.fig.subplots_adjust(
             bottom=0.16, top=0.9, left=0.04, right=0.97, wspace=0.25
         )
-        outer = self.fig.add_gridspec(1, 3)
-        self._sim_spec = outer[0, 0]
-        self._monty_spec = outer[0, 1]
-        self._details_spec = outer[0, 2]
+        if self.attention_vis:
+            # Two rows: the three regular sections compressed on top, the attention
+            # voxel grid and segmented region along the bottom. The bottom row is the
+            # taller one (the attention panel is the layout's focus) and the row gap
+            # and bottom margin are kept tight; the widget rows below (special
+            # buttons / speed slider) top out around 0.09. The top margin is lowered
+            # (vs. the figure-wide 0.9) so the compressed top row's axis titles clear
+            # the selector buttons at 0.91.
+            outer = self.fig.add_gridspec(
+                2,
+                1,
+                height_ratios=[1.0, 1.25],
+                hspace=0.3,
+                top=0.86,
+                bottom=0.14,
+                left=0.04,
+                right=0.97,
+            )
+            top = GridSpecFromSubplotSpec(1, 3, subplot_spec=outer[0, 0], wspace=0.25)
+            bottom = GridSpecFromSubplotSpec(
+                1,
+                3 if self.interactive else 2,
+                subplot_spec=outer[1, 0],
+                wspace=0.25,
+            )
+            self._sim_spec = top[0, 0]
+            self._monty_spec = top[0, 1]
+            self._details_spec = top[0, 2]
+            if self.interactive:
+                # The interactive step-multiplier slider sits below the Simulator
+                # column's RGB patch, so the bottom-left third is left free for it and
+                # the two panels align under the Monty and Details columns.
+                self._attention_spec = bottom[0, 1]
+                self._segmentation_spec = bottom[0, 2]
+            else:
+                self._attention_spec = bottom[0, 0]
+                self._segmentation_spec = bottom[0, 1]
+        else:
+            outer = self.fig.add_gridspec(1, 3)
+            self._sim_spec = outer[0, 0]
+            self._monty_spec = outer[0, 1]
+            self._details_spec = outer[0, 2]
 
         self._simulator = SimulatorPanel(self.fig, self._sim_spec)
         self._monty = MontyPanel(self.fig, self._monty_spec, self._channel_view)
@@ -211,7 +282,18 @@ class LivePlotter(Plotter):
             self._details_spec,
             self._channel_view,
             self._history,
+            show_num_hypotheses=not self.attention_vis,
         )
+        if self.attention_vis:
+            self._attention = AttentionPanel(
+                self.fig, self._attention_spec, interactive=self.interactive
+            )
+            self._segmentation = SegmentationPanel(
+                self.fig, self._segmentation_spec, self.model
+            )
+        else:
+            self._attention = None
+            self._segmentation = None
         draw_section_dividers(
             self.fig, self._sim_spec, self._monty_spec, self._details_spec
         )
@@ -222,6 +304,22 @@ class LivePlotter(Plotter):
             self._controls.build(self.fig, self._simulator.ax_rgb)
         else:
             self._controls.build(self.fig)
+
+        # Two figure-level status texts flanking the `Step N` title: the enacted
+        # goal's action and source on the left, the failed-jump banner on the right.
+        self._goal_text = self.fig.text(
+            0.02, 0.99, "", ha="left", va="top", fontsize=9, color="0.25"
+        )
+        self._banner_text = self.fig.text(
+            0.98,
+            0.99,
+            "",
+            ha="right",
+            va="top",
+            fontsize=9,
+            color="red",
+            fontweight="bold",
+        )
 
         if is_interactive_backend():
             self.fig.show()
@@ -251,9 +349,37 @@ class LivePlotter(Plotter):
                 self._history.clear()
             history_step = step
         self._history.accumulate(self.model.learning_modules, history_step)
+        self._observe_jump(
+            step, new_episode=prev_step is not None and step <= prev_step
+        )
         self._render(observations, step)
         if not self.interactive:
             self._controls.pause()
+
+    def _observe_jump(self, step: int, *, new_episode: bool) -> None:
+        """Track this step's jump outcome and manage the failed-jump banner.
+
+        Observes the motor system's jump state exactly once per step (repaints via
+        `_redraw` never re-observe). When a jump failed because no object was visible
+        at the goal location and Monty moved back, the failure message is shown for
+        `FAILED_JUMP_BANNER_STEPS` steps. An episode restart drops the watcher's
+        cross-step state along with any leftover banner.
+
+        Args:
+            step: The index of the current step within the episode.
+            new_episode: Whether this step starts a new episode.
+        """
+        if new_episode:
+            self._jump_watcher = JumpWatcher()
+            self._banner_message = None
+            self._banner_until = None
+        message = self._jump_watcher.observe(self.model)
+        if message is not None:
+            self._banner_message = message
+            self._banner_until = step + FAILED_JUMP_BANNER_STEPS
+        elif self._banner_until is not None and step > self._banner_until:
+            self._banner_message = None
+            self._banner_until = None
 
     def _render(self, observations: Observations, step: int) -> None:
         """Draw every section for one frame.
@@ -263,6 +389,8 @@ class LivePlotter(Plotter):
             step: The index of the current step within the episode.
         """
         self.fig.suptitle(f"Step {step}")
+        self._goal_text.set_text(goal_status(self.model))
+        self._banner_text.set_text(self._banner_message or "")
         if self._channel_view.ensure_channel():
             self._selector.refresh_labels()
 
@@ -274,7 +402,11 @@ class LivePlotter(Plotter):
         else:
             self._draw_inference()
 
-        self._monty.draw_feature_inset()
+        if self.attention_vis:
+            self._attention.draw(self.model)
+            self._segmentation.draw()
+        else:
+            self._monty.draw_feature_inset()
 
         self.fig.canvas.draw_idle()
         self.fig.canvas.flush_events()
@@ -332,6 +464,8 @@ class LivePlotter(Plotter):
         self._simulator = None
         self._monty = None
         self._details = None
+        self._attention = None
+        self._segmentation = None
 
     def _draw_training(self) -> None:
         """Draw the exploratory-step panels from the LM buffer.

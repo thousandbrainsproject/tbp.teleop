@@ -9,6 +9,17 @@
 
 """Entrypoint for running an experiment."""
 
+import sys
+
+# `--attention_vis` is a convenience alias for the Hydra override enabling the
+# attention visualization layout on the teleop plotter. It requires a teleop hook
+# (e.g. `+hooks=monitor`) to be part of the run. Substituted in place so the
+# override stays ordered with the other positional overrides.
+if "--attention_vis" in sys.argv:
+    sys.argv[sys.argv.index("--attention_vis")] = (
+        "experiment.config.step_hook.plotter.attention_vis=true"
+    )
+
 from tbp.monty.frameworks.run_env import setup_env
 
 setup_env()

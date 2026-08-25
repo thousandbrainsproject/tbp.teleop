@@ -38,6 +38,16 @@ if TYPE_CHECKING:
         SensorModule,
     )
 
+try:  # matplotlib >= 3.9; `rcsetup.interactive_bk` was removed in 3.11
+    from matplotlib.backends import BackendFilter, backend_registry
+
+    _INTERACTIVE_BACKENDS = {
+        backend.lower()
+        for backend in backend_registry.list_builtin(BackendFilter.INTERACTIVE)
+    }
+except ImportError:  # matplotlib < 3.9
+    _INTERACTIVE_BACKENDS = {backend.lower() for backend in mpl.rcsetup.interactive_bk}
+
 
 def is_interactive_backend() -> bool:
     """Whether the active matplotlib backend can run a blocking event loop.
@@ -45,7 +55,7 @@ def is_interactive_backend() -> bool:
     Returns:
         True if the current backend is an interactive (GUI) backend.
     """
-    return mpl.get_backend() in mpl.rcsetup.interactive_bk
+    return mpl.get_backend().lower() in _INTERACTIVE_BACKENDS
 
 
 def unit(vec: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:

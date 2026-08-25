@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Callable, ClassVar
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button, Slider
 
-from tbp.teleop.goals import jump_button_text
 from tbp.teleop.policies import (
     goal_driven,
     HEADINGS,
@@ -39,9 +38,6 @@ if TYPE_CHECKING:
 END_EPISODE = "End episode"
 JUMP = "jump"
 
-# Captions longer than this are drawn in a smaller font so they fit their button.
-MAX_CAPTION_CHARS = 10
-
 
 class ActionButtons:
     """The interactive stepping control: a heading D-pad plus jump / end episode.
@@ -49,11 +45,9 @@ class ActionButtons:
     The buttons are rebuilt each time the user is asked to choose, so only the choices
     that can act this step are shown rather than greyed out. The four exploration
     headings (up / down / left / right) wrap around the RGB patch as a D-pad, each
-    pointing the way it moves the sensor. A centered "jump" button appears whenever
-    the model proposes a goal-driven action, captioned with the goal's source module
-    (e.g. "jump (learning_module_0)" for an LM's hypothesis-testing jump, "look
-    (view_finder)" for an SM's salience goal, or "move back" when the proposal undoes
-    a failed jump). A centered "End episode" button is always present.
+    pointing the way it moves the sensor. A centered "jump" button appears whenever the
+    model proposes a hypothesis-testing jump, and a centered "End episode" button is
+    always present.
 
     `override_action` blocks on the figure's event loop until a button is clicked or its
     keyboard shortcut is pressed (WASD or arrow keys for the headings, space for jump,
@@ -160,12 +154,7 @@ class ActionButtons:
         """
         return self._goal_step(proposed) or self._policy.awaits_choice(proposed)
 
-    def _rebuild(
-        self,
-        headings: list[str],
-        specials: list[str],
-        captions: dict[str, str] | None = None,
-    ) -> None:
+    def _rebuild(self, headings: list[str], specials: list[str]) -> None:
         """Replace the choice buttons: a D-pad around the patch, specials centered.
 
         Args:
@@ -173,9 +162,6 @@ class ActionButtons:
                 around the RGB patch as a D-pad.
             specials: The centered buttons below the figure ("jump" when a goal is
                 offered, then "End episode"), in left-to-right order.
-            captions: Optional display text per special button label, e.g. the jump
-                button captioned with the goal's source module. The label still keys
-                the button (and its keyboard shortcut); only the caption changes.
         """
         for button in self._buttons.values():
             button.ax.remove()
@@ -183,9 +169,8 @@ class ActionButtons:
         dpad = self._dpad_rects()
         for heading in headings:
             self._add_button(heading, dpad[heading])
-        captions = captions or {}
         for label, rect in self._special_rects(specials).items():
-            self._add_button(label, rect, captions.get(label))
+            self._add_button(label, rect)
 
         # Re-center the slider now that the patch's real extent is known (the build-time
         # placement used the axis-cell fallback before any patch was drawn).
@@ -196,23 +181,15 @@ class ActionButtons:
         self.fig.canvas.draw_idle()
         self.fig.canvas.flush_events()
 
-    def _add_button(
-        self, label: str, rect: list[float], caption: str | None = None
-    ) -> None:
+    def _add_button(self, label: str, rect: list[float]) -> None:
         """Add a single choice button at a figure-fraction rectangle.
 
         Args:
-            label: The selection the button records when clicked, and its default
-                display text.
+            label: The button label, also the selection it records when clicked.
             rect: The `[left, bottom, width, height]` figure-fraction placement.
-            caption: Display text overriding the label (e.g. "jump (lm_0)"); long
-                captions are drawn smaller so they fit the button.
         """
         ax_btn = self.fig.add_axes(rect)
-        text = caption if caption is not None else label
-        btn = Button(ax_btn, text)
-        if len(text) > MAX_CAPTION_CHARS:
-            btn.label.set_fontsize(8)
+        btn = Button(ax_btn, label)
         btn.on_clicked(lambda _event, lbl=label: self._on_click(lbl))
         self._buttons[label] = btn
 
@@ -312,15 +289,8 @@ class ActionButtons:
                 that have not reached a terminal state to time_out so the episode logs
                 cleanly.
         """
-        if self._goal_step(proposed):
-            specials = [JUMP, END_EPISODE]
-            # Caption the jump button with the goal's source (the SM or LM id), or
-            # "move back" when the proposed actions undo a failed jump.
-            captions = {JUMP: jump_button_text(self.model)}
-        else:
-            specials = [END_EPISODE]
-            captions = {}
-        self._rebuild(list(HEADINGS), specials, captions)
+        specials = [JUMP, END_EPISODE] if self._goal_step(proposed) else [END_EPISODE]
+        self._rebuild(list(HEADINGS), specials)
 
         while self._selected is None:
             self.fig.canvas.start_event_loop(0.1)

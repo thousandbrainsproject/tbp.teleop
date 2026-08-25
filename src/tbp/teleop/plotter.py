@@ -64,7 +64,7 @@ class Plotter(Protocol):
         Args:
             ctx: The runtime context supplying the random state.
             proposed: The actions the model computed for this step, offered as a
-                "jump" choice when they are a hypothesis-testing jump.
+                "jump" choice when they enact a goal.
 
         Returns:
             The actions to execute next, built from the user's button choice.
