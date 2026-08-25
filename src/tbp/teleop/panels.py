@@ -33,6 +33,7 @@ from tbp.teleop.helpers import (
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
+    from matplotlib.backend_bases import MouseEvent
     from matplotlib.figure import Figure
     from tbp.monty.cmp import Goal
     from tbp.monty.frameworks.agents import AgentID
@@ -843,6 +844,9 @@ class AttentionPanel:
     The world frame is y-up with the camera looking roughly along the z axis, so the
     grid is drawn with world x to the right, world y vertical, and world z as scene
     depth, viewed nearly head-on to match how the object's surface faces the camera.
+    That head-on view is only the starting point: dragging to rotate persists across
+    steps, and the mouse wheel zooms in and out around the frame center (also
+    persisted, and reset with each new episode's figure).
 
     Shows a placeholder when the model has no real attention system (e.g. the
     `NoopAttentionSystem`, which carries no voxel grid) or the grid is empty.
@@ -851,6 +855,14 @@ class AttentionPanel:
     # The fraction of an SM's proposed goals shown, keeping only its most salient
     # ones so the dense per-location salience goals don't clutter the voxel grid.
     TOP_SM_GOAL_FRACTION: ClassVar[float] = 0.05
+
+    # How much the projected 3D scene is enlarged within its axes box, eating into
+    # the wide internal margins a matplotlib 3D axis reserves around its cube.
+    SCENE_ZOOM: ClassVar[float] = 1.3
+
+    # Mouse-wheel zoom: the per-notch scale factor and the allowed zoom range.
+    WHEEL_ZOOM_STEP: ClassVar[float] = 1.2
+    WHEEL_ZOOM_RANGE: ClassVar[tuple[float, float]] = (0.2, 25.0)
 
     def __init__(self, fig: Figure, spec, *, interactive: bool = False) -> None:
         """Lay out the 3D voxel axis and its weight colorbar.
@@ -866,13 +878,13 @@ class AttentionPanel:
         self._selected_goal_label = "proposed goal" if interactive else "enacted goal"
         self._ax = fig.add_subplot(spec, projection="3d")
         # A 3D axis renders its (equal-aspect) scene as a roughly square block centered
-        # in its cell, so the colorbar is pinned just right of that square rather than
-        # at the far cell edge.
+        # in its cell (enlarged by SCENE_ZOOM), so the colorbar is pinned just right of
+        # that square rather than at the far cell edge.
         cell = spec.get_position(fig)
         fig_w, fig_h = fig.get_size_inches()
         cell_w = cell.x1 - cell.x0
         cell_h = cell.y1 - cell.y0
-        side_frac_x = min(cell_w * fig_w, cell_h * fig_h) / fig_w
+        side_frac_x = min(cell_w * fig_w, cell_h * fig_h) / fig_w * self.SCENE_ZOOM
         cax_left = (cell.x0 + cell.x1) / 2 + side_frac_x / 2 + 0.02
         cax_height = cell_h * 0.65
         cax_bottom = cell.y0 + (cell_h - cax_height) / 2
@@ -882,7 +894,7 @@ class AttentionPanel:
         # diverging norm keeps colors comparable across steps and the colorbar static,
         # with red excitation and blue inhibition meeting at (near-white) zero.
         self._norm = plt.Normalize(-1.0, 1.0)
-        self._cmap = plt.get_cmap("cividis")
+        self._cmap = plt.get_cmap("managua")
 
         self.fig.colorbar(
             plt.cm.ScalarMappable(norm=self._norm, cmap=self._cmap), cax=self._cax
@@ -892,6 +904,12 @@ class AttentionPanel:
         self._bounds: tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]] | None = (
             None
         )
+        # The mouse wheel zooms the view by shrinking or widening the data limits
+        # around the frame center; the level persists across steps and redraws.
+        self._wheel_zoom = 1.0
+        self._frame_state: tuple[npt.NDArray[np.float64], float] | None = None
+        self._view_initialized = False
+        fig.canvas.mpl_connect("scroll_event", self._on_scroll)
 
     def draw(self, model: Monty) -> None:
         """Draw the current voxel grid, or a placeholder when there is none.
@@ -926,8 +944,8 @@ class AttentionPanel:
             centers[:, 1],
             c=self._cmap(self._norm(weights)),
             marker="s",
-            s=8,
-            alpha=0.4,
+            s=16,
+            alpha=0.7,
             depthshade=False,
         )
         ax.set_title(f"Attention voxel grid ({len(data)} voxels)")
@@ -945,16 +963,51 @@ class AttentionPanel:
             )
 
         goal_locations = self._draw_goals(ax, model)
-        center, half = self._frame(centers, goal_locations)
-        ax.set_xlim(center[0] - half, center[0] + half)
-        ax.set_ylim(center[2] - half, center[2] + half)
-        ax.set_zlim(center[1] - half, center[1] + half)
-        ax.set_box_aspect((1, 1, 1))
-        ax.view_init(elev=8, azim=-82)
+        self._frame_state = self._frame(centers, goal_locations)
+        self._apply_frame()
+        if not self._view_initialized:
+            # The near-head-on default view, set only once: `cla` preserves the
+            # viewing angles, so the user's mouse rotation survives later redraws.
+            ax.view_init(elev=8, azim=-82)
+            self._view_initialized = True
         ax.tick_params(labelsize=6)
         # The depth (world z) axis is nearly edge-on in the head-on view, so its tick
         # labels would render as unreadable overlapping text.
         ax.set_yticks([])
+
+    def _apply_frame(self) -> None:
+        """Apply the episode frame to the axis at the current wheel-zoom level.
+
+        The frame's half side length is divided by the zoom level, so zooming in
+        narrows the limits around the frame center (and zooming out widens them)
+        while the scene keeps filling the same enlarged box in the figure.
+        """
+        center, half = self._frame_state
+        half /= self._wheel_zoom
+        ax = self._ax
+        ax.set_xlim(center[0] - half, center[0] + half)
+        ax.set_ylim(center[2] - half, center[2] + half)
+        ax.set_zlim(center[1] - half, center[1] + half)
+        ax.set_box_aspect((1, 1, 1), zoom=self.SCENE_ZOOM)
+
+    def _on_scroll(self, event: MouseEvent) -> None:
+        """Zoom the voxel view in or out on mouse wheel, around the frame center.
+
+        Only reacts while the pointer is over the attention axis and a frame has
+        been drawn. The zoom level persists across steps (each `draw` re-applies
+        it) and resets with each new episode's figure.
+
+        Args:
+            event: The matplotlib scroll event; its `step` is positive to zoom in.
+        """
+        if event.inaxes is not self._ax or self._frame_state is None:
+            return
+        low, high = self.WHEEL_ZOOM_RANGE
+        self._wheel_zoom = float(
+            np.clip(self._wheel_zoom * self.WHEEL_ZOOM_STEP**event.step, low, high)
+        )
+        self._apply_frame()
+        self.fig.canvas.draw_idle()
 
     def _draw_goals(self, ax: Axes, model: Monty) -> npt.NDArray[np.float64]:
         """Overlay this step's proposed goals on the voxel grid.
@@ -1079,7 +1132,7 @@ class AttentionPanel:
                 if passed
                 else {"marker": "x", "s": 2, "color": "hotpink"}
             )
-            return {**marker, "alpha": 0.2, "linewidths": 0.5}
+            return {**marker, "alpha": 0.5, "linewidths": 0.5}
         if passed:
             return {"marker": "*", "s": 35, "color": "green"}
         return {"marker": "x", "s": 30, "color": "red", "linewidths": 1.5}

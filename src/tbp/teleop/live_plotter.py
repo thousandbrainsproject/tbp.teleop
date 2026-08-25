@@ -82,11 +82,12 @@ class LivePlotter(Plotter):
     and Details matching-step panels degrade to a placeholder rather than raising.
 
     With `attention_vis` enabled, the three sections are compressed into a top row
-    (about half the figure height) and a second row is added along the bottom with two
-    attention-debugging panels: the `AttentionSystem`'s live voxel grid in 3D world
-    space, and the segmented region proposed by the model-free sensor module (e.g.
-    `SlicMerge`) overlaid on its camera view. To make room, the "Input Feature" inset
-    and the "Number of hypotheses per object" plot are dropped in this layout.
+    and a taller second row is added along the bottom with two attention-debugging
+    panels: the `AttentionSystem`'s live voxel grid in 3D world space (rotatable by
+    dragging and zoomable with the mouse wheel), and the segmented region proposed by
+    the model-free sensor module (e.g. `SlicMerge`) overlaid on its camera view. To
+    make room, the "Input Feature" inset and the "Number of hypotheses per object"
+    plot are dropped in this layout.
 
     Goals emitted by SMs and LMs are surfaced in several ways: a status line in the
     top-left corner names the enacted goal's action and source module each step; with
@@ -232,17 +233,20 @@ class LivePlotter(Plotter):
             bottom=0.16, top=0.9, left=0.04, right=0.97, wspace=0.25
         )
         if self.attention_vis:
-            # Two rows: the three regular sections on top at roughly half height, the
-            # attention voxel grid and segmented region along the bottom. The top
-            # margin is lowered (vs. the figure-wide 0.9) so the compressed top row's
-            # axis titles clear the selector buttons at 0.91.
+            # Two rows: the three regular sections compressed on top, the attention
+            # voxel grid and segmented region along the bottom. The bottom row is the
+            # taller one (the attention panel is the layout's focus) and the row gap
+            # and bottom margin are kept tight; the widget rows below (special
+            # buttons / speed slider) top out around 0.09. The top margin is lowered
+            # (vs. the figure-wide 0.9) so the compressed top row's axis titles clear
+            # the selector buttons at 0.91.
             outer = self.fig.add_gridspec(
                 2,
                 1,
-                height_ratios=[1.0, 0.95],
-                hspace=0.4,
+                height_ratios=[1.0, 1.25],
+                hspace=0.3,
                 top=0.86,
-                bottom=0.16,
+                bottom=0.14,
                 left=0.04,
                 right=0.97,
             )
