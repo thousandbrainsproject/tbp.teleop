@@ -748,11 +748,14 @@ class AttentionPanel:
     """The attention section: the `AttentionSystem`'s live voxel grid in 3D space.
 
     Draws the attention system's persistent sparse voxel grid as a 3D scatter of voxel
-    centers in world coordinates, colored by each voxel's attention weight. Because the
-    grid decays voxels that are not re-proposed and expires those that reach zero, the
-    color of a voxel doubles as a recency signal: bright voxels were proposed this step,
-    dim ones are decaying memories. The axis frame is the union of every extent seen so
-    far in the episode, so the view stays stable as attention moves.
+    centers in world coordinates, colored by each voxel's attention weight on a
+    diverging scale: red for excitation, blue for inhibition, fading to white as a
+    weight decays toward zero (and expires). The axis frame is the union of every
+    extent seen so far in the episode, so the view stays stable as attention moves.
+
+    When the most recent step's proposed grid carried the inhibit-all signal (e.g. an
+    `InhibitAllOnRecognition` region proposer fired under the `InhibitionFlipsGrid`
+    merge), a warning is drawn over the panel on that step.
 
     The world frame is y-up with the camera looking roughly along the z axis, so the
     grid is drawn with world x to the right, world y vertical, and world z as scene
@@ -783,11 +786,12 @@ class AttentionPanel:
         cax_height = cell_h * 0.65
         cax_bottom = cell.y0 + (cell_h - cax_height) / 2
         self._cax = fig.add_axes([cax_left, cax_bottom, 0.008, cax_height])
-        # Weights live in [0, MAX_ATTENTION_WEIGHT] (= 1.0) and decay toward zero, so a
-        # fixed norm keeps colors comparable across steps and the colorbar static.
-        # Negative (inhibitory) weights clip to the lowest color.
-        self._norm = plt.Normalize(0.0, 1.0)
-        self._cmap = plt.get_cmap("viridis")
+        # Weights live in [MIN_ATTENTION_WEIGHT, MAX_ATTENTION_WEIGHT] (= [-1, 1]):
+        # positive excitation decays toward zero, negative weights inhibit. A fixed
+        # diverging norm keeps colors comparable across steps and the colorbar static,
+        # with red excitation and blue inhibition meeting at (near-white) zero.
+        self._norm = plt.Normalize(-1.0, 1.0)
+        self._cmap = plt.get_cmap("coolwarm")
         self.fig.colorbar(
             plt.cm.ScalarMappable(norm=self._norm, cmap=self._cmap), cax=self._cax
         )
@@ -804,7 +808,7 @@ class AttentionPanel:
             model: The Monty model whose attention system is read.
         """
         attention = getattr(model, "attention_system", None)
-        grid = getattr(attention, "voxel_grid", None)
+        grid = getattr(attention, "grid", None)
         if grid is None:
             self._draw_placeholder("no attention system")
             return
@@ -833,6 +837,18 @@ class AttentionPanel:
             depthshade=False,
         )
         ax.set_title(f"Attention voxel grid ({len(data)} voxels)")
+        if self._inhibit_all_proposed(attention):
+            ax.text2D(
+                0.5,
+                0.97,
+                "inhibit-all proposed: grid flipped to inhibition",
+                color="red",
+                fontweight="bold",
+                fontsize=9,
+                ha="center",
+                va="top",
+                transform=ax.transAxes,
+            )
 
         center, half = self._frame(centers)
         ax.set_xlim(center[0] - half, center[0] + half)
@@ -844,6 +860,23 @@ class AttentionPanel:
         # The depth (world z) axis is nearly edge-on in the head-on view, so its tick
         # labels would render as unreadable overlapping text.
         ax.set_yticks([])
+
+    @staticmethod
+    def _inhibit_all_proposed(attention: object) -> bool:
+        """Whether this step's proposed grid carried the inhibit-all signal.
+
+        The persistent grid never carries the signal itself; it rides on the per-step
+        proposal recorded in the attention system's telemetry, so the last proposed
+        grid flags exactly the step a flip takes place.
+
+        Args:
+            attention: The model's attention system.
+
+        Returns:
+            True when the most recent proposed grid signals inhibit-all.
+        """
+        proposed = attention.state_dict().get("proposed_grids", [])
+        return bool(proposed) and bool(getattr(proposed[-1], "inhibit_all", False))
 
     def _frame(
         self, centers: npt.NDArray[np.float64]
@@ -894,9 +927,11 @@ class SegmentationPanel:
     on. The panel shows the camera image with everything outside the segmented region
     dimmed, the region boundary outlined, and the fixation point (image center) marked.
 
-    The sensor module only records telemetry when configured with `save_raw_obs=true`,
-    so the panel explains that requirement instead of drawing when it is off. It
-    likewise shows a placeholder when no sensor module has a segmentation strategy.
+    The sensor module only records when configured with `save_raw_obs=true` (which
+    installs a recording `SalienceSMTelemetry` rather than the no-op one, detected here
+    by the telemetry carrying the recorded lists), so the panel explains that
+    requirement instead of drawing when it is off. It likewise shows a placeholder when
+    no sensor module has a segmentation strategy.
     """
 
     def __init__(self, fig: Figure, spec, model: Monty) -> None:
@@ -927,20 +962,23 @@ class SegmentationPanel:
         if self._sm is None:
             self._draw_placeholder("no segmentation strategy configured")
             return
-        if not getattr(self._sm, "_save_raw_obs", False):
+        telemetry = self._sm._snapshot_telemetry
+        maps = getattr(telemetry, "segmentation_maps", None)
+        raw_observations = getattr(telemetry, "raw_observations", None)
+        if maps is None or raw_observations is None:
+            # The no-op telemetry carries no recorded lists at all.
             self._draw_placeholder(
                 "Segmentation view disabled:\n"
                 f"set save_raw_obs=true on sensor module "
                 f"{self._sm.sensor_module_id!r}\nso it records its segmentation maps"
             )
             return
-        telemetry = self._sm._snapshot_telemetry
-        if not telemetry.segmentation_maps or not telemetry.raw_observations:
+        if not maps or not raw_observations:
             self._draw_placeholder("no segmentation recorded yet")
             return
 
-        mask = telemetry.segmentation_maps[-1]
-        rgba = np.asarray(telemetry.raw_observations[-1]["rgba"])
+        mask = maps[-1]
+        rgba = np.asarray(raw_observations[-1]["rgba"])
         strategy_name = type(self._sm._segmentation_strategy).__name__
         ax.set_title(
             f"Segmented region ({strategy_name} on {self._sm.sensor_module_id})"
