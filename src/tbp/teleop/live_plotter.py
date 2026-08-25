@@ -23,6 +23,7 @@ from tbp.teleop.controls import (
     SelectorBar,
     SpeedSlider,
 )
+from tbp.teleop.goals import JumpWatcher, goal_status
 from tbp.teleop.helpers import (
     ChannelView,
     EvidenceHistory,
@@ -46,6 +47,10 @@ if TYPE_CHECKING:
         Monty,
         Observations,
     )
+
+
+# How many steps a failed-jump banner stays visible after the move-back step.
+FAILED_JUMP_BANNER_STEPS = 5
 
 
 class LivePlotter(Plotter):
@@ -82,6 +87,15 @@ class LivePlotter(Plotter):
     space, and the segmented region proposed by the model-free sensor module (e.g.
     `SlicMerge`) overlaid on its camera view. To make room, the "Input Feature" inset
     and the "Number of hypotheses per object" plot are dropped in this layout.
+
+    Goals emitted by SMs and LMs are surfaced in several ways: a status line in the
+    top-left corner names the enacted goal's action and source module each step; with
+    `attention_vis` enabled, the attention panel overlays every proposed goal on the
+    voxel grid, styled by whether it fell within the active attention space; the
+    matching-step MLH view marks the displayed LM's current goal target on the
+    hypothesized model; and a red top-right banner reports for a few steps when a
+    goal was unsuccessful because no object was visible at its location and Monty
+    moved back.
     """
 
     _channel_view: ChannelView
@@ -187,6 +201,9 @@ class LivePlotter(Plotter):
         self._last_observations = None
         self._last_step = None
         self._supervised_lm_ids = supervised_lm_ids
+        self._jump_watcher = JumpWatcher()
+        self._banner_message: str | None = None
+        self._banner_until: int | None = None
 
         self._build_figure()
 
@@ -264,7 +281,9 @@ class LivePlotter(Plotter):
             show_num_hypotheses=not self.attention_vis,
         )
         if self.attention_vis:
-            self._attention = AttentionPanel(self.fig, self._attention_spec)
+            self._attention = AttentionPanel(
+                self.fig, self._attention_spec, interactive=self.interactive
+            )
             self._segmentation = SegmentationPanel(
                 self.fig, self._segmentation_spec, self.model
             )
@@ -281,6 +300,22 @@ class LivePlotter(Plotter):
             self._controls.build(self.fig, self._simulator.ax_rgb)
         else:
             self._controls.build(self.fig)
+
+        # Two figure-level status texts flanking the `Step N` title: the enacted
+        # goal's action and source on the left, the failed-jump banner on the right.
+        self._goal_text = self.fig.text(
+            0.02, 0.99, "", ha="left", va="top", fontsize=9, color="0.25"
+        )
+        self._banner_text = self.fig.text(
+            0.98,
+            0.99,
+            "",
+            ha="right",
+            va="top",
+            fontsize=9,
+            color="red",
+            fontweight="bold",
+        )
 
         if is_interactive_backend():
             self.fig.show()
@@ -310,9 +345,37 @@ class LivePlotter(Plotter):
                 self._history.clear()
             history_step = step
         self._history.accumulate(self.model.learning_modules, history_step)
+        self._observe_jump(
+            step, new_episode=prev_step is not None and step <= prev_step
+        )
         self._render(observations, step)
         if not self.interactive:
             self._controls.pause()
+
+    def _observe_jump(self, step: int, *, new_episode: bool) -> None:
+        """Track this step's jump outcome and manage the failed-jump banner.
+
+        Observes the motor system's jump state exactly once per step (repaints via
+        `_redraw` never re-observe). When a jump failed because no object was visible
+        at the goal location and Monty moved back, the failure message is shown for
+        `FAILED_JUMP_BANNER_STEPS` steps. An episode restart drops the watcher's
+        cross-step state along with any leftover banner.
+
+        Args:
+            step: The index of the current step within the episode.
+            new_episode: Whether this step starts a new episode.
+        """
+        if new_episode:
+            self._jump_watcher = JumpWatcher()
+            self._banner_message = None
+            self._banner_until = None
+        message = self._jump_watcher.observe(self.model)
+        if message is not None:
+            self._banner_message = message
+            self._banner_until = step + FAILED_JUMP_BANNER_STEPS
+        elif self._banner_until is not None and step > self._banner_until:
+            self._banner_message = None
+            self._banner_until = None
 
     def _render(self, observations: Observations, step: int) -> None:
         """Draw every section for one frame.
@@ -322,6 +385,8 @@ class LivePlotter(Plotter):
             step: The index of the current step within the episode.
         """
         self.fig.suptitle(f"Step {step}")
+        self._goal_text.set_text(goal_status(self.model))
+        self._banner_text.set_text(self._banner_message or "")
         if self._channel_view.ensure_channel():
             self._selector.refresh_labels()
 

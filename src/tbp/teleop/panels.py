@@ -18,6 +18,7 @@ from tbp.monty.frameworks.models.two_d_sensor_module import TwoDSensorModule
 from tbp.monty.frameworks.sensors import SensorID
 from tbp.monty.frameworks.utils.plot_utils import add_patch_outline_to_view_finder
 
+from tbp.teleop.goals import enacted_goal, passed_attention_filter, proposed_goals
 from tbp.teleop.helpers import (
     ChannelView,
     EvidenceHistory,
@@ -252,7 +253,9 @@ class MontyPanel:
         graph, otherwise the graph's first sensor-module channel. Falls back to a "No
         MLH" placeholder when there is no current hypothesis or the graph cannot be
         retrieved. Planar graphs are drawn as edge-oriented segments; all other graphs
-        as a 3D point cloud.
+        as a 3D point cloud. When the displayed LM's goal generator holds a current
+        hypothesis-testing goal targeting the drawn graph, the goal's model-frame
+        target location is marked as a green star labeled with the LM id.
         """
         lm = self.channel_view.lm
         graph = None
@@ -279,6 +282,33 @@ class MontyPanel:
         else:
             ax = self._ensure_projection(None)
             self._show_mlh_2d(ax, mlh, graph, pos, color)
+
+    def _goal_in_model_frame(
+        self, graph_id: str
+    ) -> tuple[npt.NDArray[np.float64], str] | None:
+        """The displayed LM's current goal target on the drawn MLH graph.
+
+        An LM's goal generator snapshots the model-frame target location (and the
+        graph it was proposed on) in the goal's `info` when the goal is created, so
+        the target can be marked directly on the stored graph. The marker is only
+        meaningful while the drawn MLH graph is the one the goal was proposed on.
+
+        Args:
+            graph_id: The id of the MLH graph being drawn.
+
+        Returns:
+            The `(location, sender_id)` of the goal target in the graph's model
+            frame, or `None` when the LM has no goal generator, no current goal, or
+            the goal targets a different graph.
+        """
+        gsg = getattr(self.channel_view.lm, "gsg", None)
+        goal = getattr(gsg, "output_goal", None)
+        if goal is None:
+            return None
+        location = goal.info.get("model_frame_target_loc")
+        if location is None or goal.info.get("model_frame_graph_id") != graph_id:
+            return None
+        return np.asarray(location, dtype=float), str(goal.sender_id)
 
     def draw_feature_inset(self) -> None:
         """Draw the Monty section's "Input Feature" inset for the selected channel."""
@@ -397,9 +427,16 @@ class MontyPanel:
         return "red" if mlh["evidence"] > evidence_threshold else "gray"
 
     def _show_mlh_3d(
-        self, ax: Axes, mlh: dict, pos: npt.NDArray[np.float64], mlh_color: str
+        self,
+        ax: Axes,
+        mlh: dict,
+        pos: npt.NDArray[np.float64],
+        mlh_color: str,
     ) -> None:
         """Render a 3D graph as a point cloud with the MLH location marked.
+
+        When the displayed LM holds a current goal targeting this graph, its
+        model-frame target location is marked as a labeled green star.
 
         Args:
             ax: The 3D Monty axis.
@@ -407,6 +444,7 @@ class MontyPanel:
             pos: The graph node positions, shape `(N, 3)`.
             mlh_color: The MLH location marker color.
         """
+        goal_marker = self._goal_in_model_frame(mlh["graph_id"])
         ax.cla()
         ax.scatter(pos[:, 1], pos[:, 0], pos[:, 2], c="black", s=2)
         ax.scatter(
@@ -416,6 +454,19 @@ class MontyPanel:
             c=mlh_color,
             s=15,
         )
+        if goal_marker is not None:
+            location, sender = goal_marker
+            ax.scatter(
+                location[1],
+                location[0],
+                location[2],
+                marker="*",
+                c="green",
+                s=80,
+                label=f"goal ({sender})",
+                depthshade=False,
+            )
+            ax.legend(fontsize=7, loc="upper right")
         ax.set_title(f"MLH ({mlh['graph_id']})")
         ax.set_axis_off()
         ax.set_aspect("equal")
@@ -430,6 +481,9 @@ class MontyPanel:
     ) -> None:
         """Render a 2D SM graph as hsv-colored, edge-oriented segments.
 
+        When the displayed LM holds a current goal targeting this graph, its
+        model-frame target location is marked as a labeled green star.
+
         Args:
             ax: The 2D Monty axis.
             mlh: The current most likely hypothesis.
@@ -437,6 +491,7 @@ class MontyPanel:
             pos: The graph node positions, shape `(N, >=2)`.
             mlh_color: The MLH location marker color.
         """
+        goal_marker = self._goal_in_model_frame(mlh["graph_id"])
         ax.cla()
         x, y = pos[:, 0], pos[:, 1]
         fm = graph.feature_mapping
@@ -461,6 +516,18 @@ class MontyPanel:
             markeredgewidth=2,
             zorder=3,
         )
+        if goal_marker is not None:
+            location, sender = goal_marker
+            ax.plot(
+                location[0],
+                location[1],
+                "*",
+                color="green",
+                markersize=12,
+                label=f"goal ({sender})",
+                zorder=3,
+            )
+            ax.legend(fontsize=7, loc="upper right")
         ax.set_title(f"MLH ({mlh['graph_id']})")
 
 
@@ -753,6 +820,18 @@ class AttentionPanel:
     weight decays toward zero (and expires). The axis frame is the union of every
     extent seen so far in the episode, so the view stays stable as attention moves.
 
+    This step's proposed goals are overlaid at their world locations, grouped by
+    source (the proposing SM or LM id, shown in the legend) and styled by whether
+    each fell within the active attention space (stars for goals the attention filter
+    kept, crosses for goals it dropped). SM salience goals are dense (one per
+    on-object location), so they are drawn small, translucent, and hot pink to avoid
+    washing out the voxel weights beneath; the sparse LM goals are larger and opaque
+    (green when kept, red when dropped). The goal the policy selector chose this step
+    is drawn as a larger gold star — labeled "enacted goal" when monitoring (the
+    actions always execute) or "proposed goal" when interactive (the same goal the
+    jump button would enact, which the user may decline). The frame is widened to
+    enclose the goals, so a goal outside the attended region stays visible.
+
     When the most recent step's proposed grid carried the inhibit-all signal (e.g. an
     `InhibitAllOnRecognition` region proposer fired under the `InhibitionFlipsGrid`
     merge), a warning is drawn over the panel on that step.
@@ -765,14 +844,18 @@ class AttentionPanel:
     `NoopAttentionSystem`, which carries no voxel grid) or the grid is empty.
     """
 
-    def __init__(self, fig: Figure, spec) -> None:
+    def __init__(self, fig: Figure, spec, *, interactive: bool = False) -> None:
         """Lay out the 3D voxel axis and its weight colorbar.
 
         Args:
             fig: The figure to draw on.
             spec: The attention panel's gridspec subplot spec.
+            interactive: Whether the plotter is interactive, in which case the
+                selected goal is a proposal the user may decline rather than an
+                action that will certainly execute, and is labeled accordingly.
         """
         self.fig = fig
+        self._selected_goal_label = "proposed goal" if interactive else "enacted goal"
         self._ax = fig.add_subplot(spec, projection="3d")
         # A 3D axis renders its (equal-aspect) scene as a roughly square block centered
         # in its cell, so the colorbar is pinned just right of that square rather than
@@ -827,6 +910,7 @@ class AttentionPanel:
         ax.set_axis_on()
         # Plot axes are (world x, world z, world y) so world-up is vertical and world z
         # is depth; the near-head-on view then matches the camera's perspective.
+        # Translucent so the goal markers overlaid on the grid stay visible.
         ax.scatter(
             centers[:, 0],
             centers[:, 2],
@@ -834,6 +918,7 @@ class AttentionPanel:
             c=self._cmap(self._norm(weights)),
             marker="s",
             s=8,
+            alpha=0.45,
             depthshade=False,
         )
         ax.set_title(f"Attention voxel grid ({len(data)} voxels)")
@@ -850,7 +935,8 @@ class AttentionPanel:
                 transform=ax.transAxes,
             )
 
-        center, half = self._frame(centers)
+        goal_locations = self._draw_goals(ax, model)
+        center, half = self._frame(centers, goal_locations)
         ax.set_xlim(center[0] - half, center[0] + half)
         ax.set_ylim(center[2] - half, center[2] + half)
         ax.set_zlim(center[1] - half, center[1] + half)
@@ -860,6 +946,98 @@ class AttentionPanel:
         # The depth (world z) axis is nearly edge-on in the head-on view, so its tick
         # labels would render as unreadable overlapping text.
         ax.set_yticks([])
+
+    def _draw_goals(self, ax: Axes, model: Monty) -> npt.NDArray[np.float64]:
+        """Overlay this step's proposed goals on the voxel grid.
+
+        Goals are grouped by their proposing module and by whether they fell within
+        the active attention space, one scatter (and legend entry) per group: stars
+        for goals the attention filter kept, crosses for goals it dropped. Dense SM
+        salience goals are small, translucent, and hot pink so the voxel weights stay
+        readable beneath them; sparse LM (GSG) goals are larger and opaque, green
+        when kept and red when dropped. The goal the policy selector chose this step
+        is drawn separately as a larger gold star, labeled "enacted goal" or
+        "proposed goal" per the plotter's interactivity. Sources are named by the
+        goal's sender id, so the legend shows which SM or LM proposed each group.
+
+        Args:
+            ax: The 3D voxel axis, using (world x, world z, world y) plot axes.
+            model: The Monty model whose goals are read.
+
+        Returns:
+            The `(G, 3)` world locations of the drawn goals, for widening the frame;
+            empty `(0, 3)` when there are no located goals.
+        """
+        goals = [g for g in proposed_goals(model) if g.location is not None]
+        if not goals:
+            return np.empty((0, 3))
+        enacted = enacted_goal(model)
+
+        groups: dict[tuple[str, str, bool], list[npt.NDArray[np.float64]]] = {}
+        for goal in goals:
+            if goal is enacted:
+                continue
+            key = (
+                str(goal.sender_id),
+                str(goal.sender_type),
+                passed_attention_filter(goal),
+            )
+            groups.setdefault(key, []).append(np.asarray(goal.location, dtype=float))
+
+        for (sender, sender_type, passed), locations in sorted(groups.items()):
+            pts = np.asarray(locations)
+            style = self._goal_style(sender_type, passed=passed)
+            status = "in attention" if passed else "filtered out"
+            ax.scatter(
+                pts[:, 0],
+                pts[:, 2],
+                pts[:, 1],
+                label=f"{sender} goals ({status})",
+                depthshade=False,
+                **style,
+            )
+
+        drawn = [np.asarray(g.location, dtype=float) for g in goals]
+        if enacted is not None and enacted.location is not None:
+            loc = np.asarray(enacted.location, dtype=float)
+            ax.scatter(
+                [loc[0]],
+                [loc[2]],
+                [loc[1]],
+                marker="*",
+                s=150,
+                color="gold",
+                edgecolors="black",
+                linewidths=0.8,
+                label=f"{self._selected_goal_label} ({enacted.sender_id})",
+                depthshade=False,
+            )
+        ax.legend(fontsize=6, loc="upper left")
+        return np.asarray(drawn)
+
+    @staticmethod
+    def _goal_style(sender_type: str, *, passed: bool) -> dict:
+        """Resolve the scatter style for a group of goal markers.
+
+        An SM proposes one salience goal per on-object location, so its markers are
+        small, translucent, and hot pink (a color outside the voxel colormap) to
+        avoid washing out the attention weights beneath. LM (GSG) goals are rare, so
+        they stay larger and opaque: green when kept, red when dropped. Kept goals
+        are stars; dropped goals are crosses.
+
+        Args:
+            sender_type: The goal's sender type (`"SM"` or `"GSG"`).
+            passed: Whether the goal fell within the active attention space.
+
+        Returns:
+            The scatter keyword arguments for the group.
+        """
+        if sender_type == "SM":
+            marker = {"marker": "*", "s": 14} if passed else {"marker": "x", "s": 10}
+            return {**marker, "color": "hotpink", "alpha": 0.45, "linewidths": 1.0}
+        if passed:
+            return {"marker": "*", "s": 35, "color": "green"}
+        return {"marker": "x", "s": 30, "color": "red", "linewidths": 1.5}
 
     @staticmethod
     def _inhibit_all_proposed(attention: object) -> bool:
@@ -879,7 +1057,9 @@ class AttentionPanel:
         return bool(proposed) and bool(getattr(proposed[-1], "inhibit_all", False))
 
     def _frame(
-        self, centers: npt.NDArray[np.float64]
+        self,
+        centers: npt.NDArray[np.float64],
+        extra: npt.NDArray[np.float64] | None = None,
     ) -> tuple[npt.NDArray[np.float64], float]:
         """Return a stable cubic frame enclosing every voxel seen this episode.
 
@@ -888,10 +1068,14 @@ class AttentionPanel:
 
         Args:
             centers: The `(V, 3)` world-frame voxel centers drawn this step.
+            extra: Additional `(G, 3)` world points the frame must also enclose
+                (e.g. goal locations outside the attended region), or `None`/empty.
 
         Returns:
             The frame's per-axis center and half side length.
         """
+        if extra is not None and len(extra):
+            centers = np.concatenate([centers, extra])
         low = centers.min(axis=0)
         high = centers.max(axis=0)
         if self._bounds is None:
