@@ -8,7 +8,8 @@
 # https://opensource.org/licenses/MIT.
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import math
+from typing import TYPE_CHECKING, ClassVar
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -33,6 +34,7 @@ from tbp.teleop.helpers import (
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
+    from tbp.monty.cmp import Goal
     from tbp.monty.frameworks.agents import AgentID
     from tbp.monty.frameworks.models.abstract_monty_classes import (
         AgentObservations,
@@ -824,13 +826,15 @@ class AttentionPanel:
     source (the proposing SM or LM id, shown in the legend) and styled by whether
     each fell within the active attention space (stars for goals the attention filter
     kept, crosses for goals it dropped). SM salience goals are dense (one per
-    on-object location), so they are drawn small, translucent, and hot pink to avoid
-    washing out the voxel weights beneath; the sparse LM goals are larger and opaque
-    (green when kept, red when dropped). The goal the policy selector chose this step
-    is drawn as a larger gold star — labeled "enacted goal" when monitoring (the
-    actions always execute) or "proposed goal" when interactive (the same goal the
-    jump button would enact, which the user may decline). The frame is widened to
-    enclose the goals, so a goal outside the attended region stays visible.
+    on-object location), so only each SM's top 5% by confidence (its salience) are
+    shown — labeled "top ... goals" — drawn small, translucent, and hot pink to avoid
+    washing out the voxel weights beneath; the sparse LM goals are all shown, larger
+    and opaque (green when kept, red when dropped). The goal the policy selector
+    chose this step is drawn as a larger gold star — labeled "enacted goal" when
+    monitoring (the actions always execute) or "proposed goal" when interactive (the
+    same goal the jump button would enact, which the user may decline). The frame is
+    widened to enclose the goals, so a goal outside the attended region stays
+    visible.
 
     When the most recent step's proposed grid carried the inhibit-all signal (e.g. an
     `InhibitAllOnRecognition` region proposer fired under the `InhibitionFlipsGrid`
@@ -843,6 +847,10 @@ class AttentionPanel:
     Shows a placeholder when the model has no real attention system (e.g. the
     `NoopAttentionSystem`, which carries no voxel grid) or the grid is empty.
     """
+
+    # The fraction of an SM's proposed goals shown, keeping only its most salient
+    # ones so the dense per-location salience goals don't clutter the voxel grid.
+    TOP_SM_GOAL_FRACTION: ClassVar[float] = 0.05
 
     def __init__(self, fig: Figure, spec, *, interactive: bool = False) -> None:
         """Lay out the 3D voxel axis and its weight colorbar.
@@ -953,12 +961,14 @@ class AttentionPanel:
         Goals are grouped by their proposing module and by whether they fell within
         the active attention space, one scatter (and legend entry) per group: stars
         for goals the attention filter kept, crosses for goals it dropped. Dense SM
-        salience goals are small, translucent, and hot pink so the voxel weights stay
-        readable beneath them; sparse LM (GSG) goals are larger and opaque, green
-        when kept and red when dropped. The goal the policy selector chose this step
-        is drawn separately as a larger gold star, labeled "enacted goal" or
-        "proposed goal" per the plotter's interactivity. Sources are named by the
-        goal's sender id, so the legend shows which SM or LM proposed each group.
+        salience goals are thinned to each SM's most salient few (see
+        `_top_sm_goals`) and drawn small, translucent, and hot pink so the voxel
+        weights stay readable beneath them; sparse LM (GSG) goals are all drawn,
+        larger and opaque, green when kept and red when dropped. The goal the policy
+        selector chose this step is drawn separately as a larger gold star, labeled
+        "enacted goal" or "proposed goal" per the plotter's interactivity. Sources
+        are named by the goal's sender id, so the legend shows which SM or LM
+        proposed each group.
 
         Args:
             ax: The 3D voxel axis, using (world x, world z, world y) plot axes.
@@ -971,6 +981,7 @@ class AttentionPanel:
         goals = [g for g in proposed_goals(model) if g.location is not None]
         if not goals:
             return np.empty((0, 3))
+        goals = self._top_sm_goals(goals)
         enacted = enacted_goal(model)
 
         groups: dict[tuple[str, str, bool], list[npt.NDArray[np.float64]]] = {}
@@ -988,11 +999,12 @@ class AttentionPanel:
             pts = np.asarray(locations)
             style = self._goal_style(sender_type, passed=passed)
             status = "in attention" if passed else "filtered out"
+            name = f"top {sender} goals" if sender_type == "SM" else f"{sender} goals"
             ax.scatter(
                 pts[:, 0],
                 pts[:, 2],
                 pts[:, 1],
-                label=f"{sender} goals ({status})",
+                label=f"{name} ({status})",
                 depthshade=False,
                 **style,
             )
@@ -1000,6 +1012,7 @@ class AttentionPanel:
         drawn = [np.asarray(g.location, dtype=float) for g in goals]
         if enacted is not None and enacted.location is not None:
             loc = np.asarray(enacted.location, dtype=float)
+            drawn.append(loc)
             ax.scatter(
                 [loc[0]],
                 [loc[2]],
@@ -1014,6 +1027,33 @@ class AttentionPanel:
             )
         ax.legend(fontsize=6, loc="upper left")
         return np.asarray(drawn)
+
+    @classmethod
+    def _top_sm_goals(cls, goals: list[Goal]) -> list[Goal]:
+        """Keep every LM goal but only each SM's most salient few.
+
+        An SM proposes one goal per on-object location with its salience as the
+        confidence, so drawing them all buries the voxel grid. Each SM's goals are
+        thinned to its top `TOP_SM_GOAL_FRACTION` by confidence (at least one), which
+        are also the ones the motor system would choose between. LM goals are rare
+        and always kept.
+
+        Args:
+            goals: This step's located proposed goals.
+
+        Returns:
+            The goals to draw, with each SM's list reduced to its most salient few.
+        """
+        kept = [g for g in goals if g.sender_type != "SM"]
+        by_sender: dict[str, list[Goal]] = {}
+        for goal in goals:
+            if goal.sender_type == "SM":
+                by_sender.setdefault(str(goal.sender_id), []).append(goal)
+        for sender_goals in by_sender.values():
+            count = max(1, math.ceil(len(sender_goals) * cls.TOP_SM_GOAL_FRACTION))
+            ranked = sorted(sender_goals, key=lambda g: g.confidence, reverse=True)
+            kept.extend(ranked[:count])
+        return kept
 
     @staticmethod
     def _goal_style(sender_type: str, *, passed: bool) -> dict:
