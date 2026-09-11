@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 from matplotlib.gridspec import GridSpecFromSubplotSpec
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from tbp.monty.frameworks.models.two_d_sensor_module import TwoDSensorModule
 from tbp.monty.frameworks.sensors import SensorID
 from tbp.monty.frameworks.utils.plot_utils import add_patch_outline_to_view_finder
@@ -1064,21 +1065,21 @@ class AttentionPanel:
             )
 
         drawn = [np.asarray(g.location, dtype=float) for g in goals]
-        if enacted is not None and enacted.location is not None:
-            loc = np.asarray(enacted.location, dtype=float)
-            drawn.append(loc)
-            ax.scatter(
-                [loc[0]],
-                [loc[2]],
-                [loc[1]],
-                marker="*",
-                s=150,
-                color="gold",
-                edgecolors="black",
-                linewidths=0.8,
-                label=f"{self._selected_goal_label} ({enacted.sender_id})",
-                depthshade=False,
-            )
+        # if enacted is not None and enacted.location is not None:
+        #     loc = np.asarray(enacted.location, dtype=float)
+        #     drawn.append(loc)
+        #     ax.scatter(
+        #         [loc[0]],
+        #         [loc[2]],
+        #         [loc[1]],
+        #         marker="*",
+        #         s=150,
+        #         color="gold",
+        #         edgecolors="black",
+        #         linewidths=0.8,
+        #         label=f"{self._selected_goal_label} ({enacted.sender_id})",
+        #         depthshade=False,
+        #     )
         ax.legend(fontsize=6, loc="upper left")
         return np.asarray(drawn)
 
@@ -1198,6 +1199,110 @@ class AttentionPanel:
         ax.cla()
         ax.set_axis_off()
         ax.text2D(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes)
+
+
+class SaliencePanel:
+    """The salience section: the salience map the model-free SM extracted this step.
+
+    Finds the sensor module carrying a salience strategy (e.g. `Vocus2` on a
+    `SalienceSM`) and reads the 2D salience map the module recorded in its telemetry,
+    so the heatmap shows exactly the map the module turned into goals this step. The
+    map is drawn as a heatmap with a colorbar, with the fixation point (image center)
+    marked. Maps already normalized to `[0, 1]` (the strategies' default) keep a fixed
+    color scale so frames are comparable; any other range is scaled per frame.
+
+    The sensor module only records when configured with `save_raw_obs=true` (which
+    installs a recording `SalienceSMTelemetry` rather than the no-op one, detected here
+    by the telemetry carrying the recorded list), so the panel explains that
+    requirement instead of drawing when it is off. It likewise shows a placeholder when
+    no sensor module has a salience strategy.
+    """
+
+    CMAP: ClassVar[str] = "inferno"
+
+    def __init__(self, fig: Figure, spec, model: Monty) -> None:
+        """Bind the panel to its axes and resolve the salience sensor module.
+
+        Args:
+            fig: The figure to draw on.
+            spec: The salience panel's gridspec subplot spec.
+            model: The Monty model whose sensor modules are searched for a salience
+                strategy.
+        """
+        self.fig = fig
+        self._ax = fig.add_subplot(spec)
+        # A divider-managed colorbar axis hugs the (square, equal-aspect) heatmap
+        # rather than the far edge of the wider cell, and is created once so redraws
+        # don't accumulate colorbars.
+        self._cax = make_axes_locatable(self._ax).append_axes(
+            "right", size="5%", pad=0.08
+        )
+        self._sm = next(
+            (
+                sm
+                for sm in model.sensor_modules
+                if getattr(sm, "_salience_strategy", None) is not None
+            ),
+            None,
+        )
+
+    def draw(self) -> None:
+        """Draw the salience heatmap recorded for the most recent step."""
+        ax = self._ax
+        ax.cla()
+        ax.set_axis_off()
+        self._cax.cla()
+        self._cax.set_axis_off()
+        if self._sm is None:
+            self._draw_placeholder("no salience strategy configured")
+            return
+        telemetry = self._sm._snapshot_telemetry
+        maps = getattr(telemetry, "salience_maps", None)
+        if maps is None:
+            # The no-op telemetry carries no recorded lists at all.
+            self._draw_placeholder(
+                "Salience view disabled:\n"
+                f"set save_raw_obs=true on sensor module "
+                f"{self._sm.sensor_module_id!r}\nso it records its salience maps"
+            )
+            return
+        if not maps:
+            self._draw_placeholder("no salience map recorded yet")
+            return
+
+        salience = np.asarray(maps[-1], dtype=float)
+        strategy_name = type(self._sm._salience_strategy).__name__
+        ax.set_title(f"Salience map ({strategy_name} on {self._sm.sensor_module_id})")
+        # The strategies range-normalize to [0, 1] by default; keep that scale fixed
+        # across frames so the same color means the same salience from step to step.
+        finite = salience[np.isfinite(salience)]
+        if finite.size and finite.min() >= 0.0 and finite.max() <= 1.0:
+            vmin, vmax = 0.0, 1.0
+        else:
+            vmin, vmax = None, None
+        image = ax.imshow(salience, cmap=self.CMAP, vmin=vmin, vmax=vmax)
+        self._cax.set_axis_on()
+        self.fig.colorbar(image, cax=self._cax)
+        self._cax.tick_params(labelsize=7)
+        # The salience sensor module fixates at the image center.
+        h, w = salience.shape[:2]
+        ax.plot(w // 2, h // 2, "+", color="cyan", markersize=10, markeredgewidth=2)
+
+    def _draw_placeholder(self, message: str) -> None:
+        """Show a centered message in place of the heatmap.
+
+        Args:
+            message: The text to display.
+        """
+        self._ax.text(
+            0.5,
+            0.5,
+            message,
+            ha="center",
+            va="center",
+            wrap=True,
+            transform=self._ax.transAxes,
+        )
 
 
 class SegmentationPanel:

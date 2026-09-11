@@ -34,6 +34,7 @@ from tbp.teleop.panels import (
     AttentionPanel,
     DetailsPanel,
     MontyPanel,
+    SaliencePanel,
     SegmentationPanel,
     SimulatorPanel,
 )
@@ -82,12 +83,13 @@ class LivePlotter(Plotter):
     and Details matching-step panels degrade to a placeholder rather than raising.
 
     With `attention_vis` enabled, the three sections are compressed into a top row
-    and a taller second row is added along the bottom with two attention-debugging
-    panels: the `AttentionSystem`'s live voxel grid in 3D world space (rotatable by
-    dragging and zoomable with the mouse wheel), and the segmented region proposed by
-    the model-free sensor module (e.g. `SlicMerge`) overlaid on its camera view. To
-    make room, the "Input Feature" inset and the "Number of hypotheses per object"
-    plot are dropped in this layout.
+    and a taller second row is added along the bottom with three attention-debugging
+    panels: the salience map the model-free sensor module (e.g. `Vocus2` on a
+    `SalienceSM`) extracted this step as a heatmap, the `AttentionSystem`'s live voxel
+    grid in 3D world space (rotatable by dragging and zoomable with the mouse wheel),
+    and the segmented region proposed by that sensor module (e.g. `SlicMerge`)
+    overlaid on its camera view. To make room, the "Input Feature" inset and the
+    "Number of hypotheses per object" plot are dropped in this layout.
 
     Goals emitted by SMs and LMs are surfaced in several ways: a status line in the
     top-left corner names the enacted goal's action and source module each step; with
@@ -122,9 +124,9 @@ class LivePlotter(Plotter):
             min_delay: Non-interactive pause in seconds at full speed.
             max_delay: Maximum non-interactive pause in seconds at the slowest speed.
             figsize: Figure size in inches.
-            attention_vis: Whether to add the bottom row with the attention voxel-grid
-                and segmented-region panels (dropping the feature inset and the
-                hypotheses plot to make room).
+            attention_vis: Whether to add the bottom row with the salience-map,
+                attention voxel-grid and segmented-region panels (dropping the
+                feature inset and the hypotheses plot to make room).
         """
         # Turn interactive plotting off so the plotter controls when figures are
         # drawn and when execution blocks, via its own canvas event loop.
@@ -233,13 +235,13 @@ class LivePlotter(Plotter):
             bottom=0.16, top=0.9, left=0.04, right=0.97, wspace=0.25
         )
         if self.attention_vis:
-            # Two rows: the three regular sections compressed on top, the attention
-            # voxel grid and segmented region along the bottom. The bottom row is the
-            # taller one (the attention panel is the layout's focus) and the row gap
-            # and bottom margin are kept tight; the widget rows below (special
-            # buttons / speed slider) top out around 0.09. The top margin is lowered
-            # (vs. the figure-wide 0.9) so the compressed top row's axis titles clear
-            # the selector buttons at 0.91.
+            # Two rows: the three regular sections compressed on top, the salience
+            # map, attention voxel grid and segmented region along the bottom. The
+            # bottom row is the taller one (the attention panel is the layout's focus)
+            # and the row gap and bottom margin are kept tight; the widget rows below
+            # (special buttons / speed slider) top out around 0.09. The top margin is
+            # lowered (vs. the figure-wide 0.9) so the compressed top row's axis titles
+            # clear the selector buttons at 0.91.
             outer = self.fig.add_gridspec(
                 2,
                 1,
@@ -252,23 +254,24 @@ class LivePlotter(Plotter):
             )
             top = GridSpecFromSubplotSpec(1, 3, subplot_spec=outer[0, 0], wspace=0.25)
             bottom = GridSpecFromSubplotSpec(
-                1,
-                3 if self.interactive else 2,
-                subplot_spec=outer[1, 0],
-                wspace=0.25,
+                1, 3, subplot_spec=outer[1, 0], wspace=0.25
             )
             self._sim_spec = top[0, 0]
             self._monty_spec = top[0, 1]
             self._details_spec = top[0, 2]
+            self._attention_spec = bottom[0, 1]
+            self._segmentation_spec = bottom[0, 2]
             if self.interactive:
-                # The interactive step-multiplier slider sits below the Simulator
-                # column's RGB patch, so the bottom-left third is left free for it and
-                # the two panels align under the Monty and Details columns.
-                self._attention_spec = bottom[0, 1]
-                self._segmentation_spec = bottom[0, 2]
+                # The interactive D-pad and step-multiplier slider hang below the
+                # Simulator column's RGB patch and reach into the top of the
+                # bottom-left cell, so the salience panel takes only the lower part
+                # of that cell, leaving the top free for the slider and its caption.
+                lower_left = GridSpecFromSubplotSpec(
+                    2, 1, subplot_spec=bottom[0, 0], height_ratios=[0.3, 0.7]
+                )
+                self._salience_spec = lower_left[1, 0]
             else:
-                self._attention_spec = bottom[0, 0]
-                self._segmentation_spec = bottom[0, 1]
+                self._salience_spec = bottom[0, 0]
         else:
             outer = self.fig.add_gridspec(1, 3)
             self._sim_spec = outer[0, 0]
@@ -285,6 +288,7 @@ class LivePlotter(Plotter):
             show_num_hypotheses=not self.attention_vis,
         )
         if self.attention_vis:
+            self._salience = SaliencePanel(self.fig, self._salience_spec, self.model)
             self._attention = AttentionPanel(
                 self.fig, self._attention_spec, interactive=self.interactive
             )
@@ -292,6 +296,7 @@ class LivePlotter(Plotter):
                 self.fig, self._segmentation_spec, self.model
             )
         else:
+            self._salience = None
             self._attention = None
             self._segmentation = None
         draw_section_dividers(
@@ -403,6 +408,7 @@ class LivePlotter(Plotter):
             self._draw_inference()
 
         if self.attention_vis:
+            self._salience.draw()
             self._attention.draw(self.model)
             self._segmentation.draw()
         else:
@@ -464,6 +470,7 @@ class LivePlotter(Plotter):
         self._simulator = None
         self._monty = None
         self._details = None
+        self._salience = None
         self._attention = None
         self._segmentation = None
 
