@@ -461,6 +461,109 @@ class EvidenceHistory:
         return updater.sampling_burst_steps > 0
 
 
+class GoalTrace:
+    """Per-LM, per-graph trace of the model-frame goal targets proposed over an episode.
+
+    An LM's goal generator snapshots each goal's model-frame target location and the
+    graph it was proposed on in the goal's `info`. Each new goal is recorded once under
+    its proposing LM and graph, so the trace for a graph reappears whenever the MLH
+    switches back to it and never bleeds onto other graphs. Pure data: the Monty section
+    reads it to draw past goals on the MLH graph.
+    """
+
+    def __init__(self) -> None:
+        """Start with an empty trace."""
+        self.locations_by_lm: dict[str, dict[str, list[npt.NDArray[np.float64]]]] = {}
+        # The `(top, second)` hypotheses each LM compared to propose a goal this step;
+        # only LMs that proposed a new goal since the last `record` have an entry.
+        self.comparison_by_lm: dict[str, tuple[dict, dict]] = {}
+        # Goals persist on the generator across steps until replaced, so the last seen
+        # goal object per LM identifies when a new goal has been proposed.
+        self._last_goal_by_lm: dict[str, object] = {}
+
+    def clear(self) -> None:
+        """Drop all recorded goals so the trace restarts from empty."""
+        self.locations_by_lm.clear()
+        self.comparison_by_lm.clear()
+        self._last_goal_by_lm.clear()
+
+    def record(self, learning_modules: list[LearningModule]) -> None:
+        """Record any goal each LM's goal generator proposed since the last call.
+
+        Also snapshots, for each LM that proposed a new goal, the two hypotheses its
+        goal generator compared to choose the goal target.
+
+        Args:
+            learning_modules: All of the model's learning modules.
+        """
+        self.comparison_by_lm.clear()
+        for lm in learning_modules:
+            goal = getattr(getattr(lm, "gsg", None), "output_goal", None)
+            lm_id = lm.learning_module_id
+            if goal is None or goal is self._last_goal_by_lm.get(lm_id):
+                continue
+            self._last_goal_by_lm[lm_id] = goal
+            location = goal.info.get("model_frame_target_loc")
+            graph_id = goal.info.get("model_frame_graph_id")
+            if location is None or graph_id is None:
+                continue
+            self.locations_by_lm.setdefault(lm_id, {}).setdefault(graph_id, []).append(
+                np.asarray(location, dtype=float)
+            )
+            comparison = self._compared_hypotheses(lm, graph_id)
+            if comparison is not None:
+                self.comparison_by_lm[lm_id] = comparison
+
+    @staticmethod
+    def _compared_hypotheses(
+        lm: LearningModule, graph_id: str
+    ) -> tuple[dict, dict] | None:
+        """The two hypotheses an LM's goal generator compared to propose its goal.
+
+        Mirrors `EvidenceGoalGenerator._compute_graph_mismatch`: the top object's MLH
+        is compared against the second most likely object's MLH or, when the generator
+        is focusing on pose, against the top object's second most likely pose. The
+        generator snapshots both object MLHs in `prev_top_mlhs` but not the second
+        pose, which is therefore re-read from the LM's current hypothesis space.
+
+        Args:
+            lm: The learning module that proposed a new goal this step.
+            graph_id: The graph the goal was proposed on.
+
+        Returns:
+            Copies of the `(top, second)` hypothesis dicts, or `None` when the goal
+            generator does not expose the comparison.
+        """
+        gsg = lm.gsg
+        top_mlhs = getattr(gsg, "prev_top_mlhs", None)
+        if not top_mlhs or top_mlhs[0].get("graph_id") != graph_id:
+            return None
+        if getattr(gsg, "focus_on_pose", False):
+            _, second = lm.get_top_two_pose_hypotheses_for_graph_id(graph_id)
+        else:
+            second = top_mlhs[1]
+        if second is None:
+            return None
+        top = top_mlhs[0]
+        return (
+            dict(top, location=np.array(top["location"], dtype=float)),
+            dict(second, location=np.array(second["location"], dtype=float)),
+        )
+
+    def locations(self, lm_id: str, graph_id: str) -> npt.NDArray[np.float64]:
+        """The recorded goal targets an LM proposed on a graph, in its model frame.
+
+        Args:
+            lm_id: The proposing learning module's id.
+            graph_id: The graph the goals were proposed on.
+
+        Returns:
+            The `(K, 3)` goal target locations in proposal order (`K` may be 0).
+        """
+        locs = self.locations_by_lm.get(lm_id, {}).get(graph_id, [])
+        return np.array(locs, dtype=float).reshape(-1, 3)
+
+
 class ChannelView:
     """The selected learning module and input channel, with channel resolution.
 

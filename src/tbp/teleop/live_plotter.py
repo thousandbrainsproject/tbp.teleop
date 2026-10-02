@@ -27,6 +27,7 @@ from tbp.teleop.goals import JumpWatcher, goal_status
 from tbp.teleop.helpers import (
     ChannelView,
     EvidenceHistory,
+    GoalTrace,
     draw_section_dividers,
     is_interactive_backend,
 )
@@ -96,9 +97,9 @@ class LivePlotter(Plotter):
     `attention_vis` enabled, the attention panel overlays every proposed goal on the
     voxel grid, styled by whether it fell within the active attention space; the
     matching-step MLH view marks the displayed LM's current goal target on the
-    hypothesized model; and a red top-right banner reports for a few steps when a
-    goal was unsuccessful because no object was visible at its location and Monty
-    moved back.
+    hypothesized model, over a faint trace of its earlier goals on that model; and a
+    red top-right banner reports for a few steps when a goal was unsuccessful because
+    no object was visible at its location and Monty moved back.
     """
 
     _channel_view: ChannelView
@@ -201,6 +202,7 @@ class LivePlotter(Plotter):
             else SpeedSlider(self.min_delay, self.max_delay)
         )
         self._history = EvidenceHistory()
+        self._goal_trace = GoalTrace()
         self._last_observations = None
         self._last_step = None
         self._supervised_lm_ids = supervised_lm_ids
@@ -279,7 +281,9 @@ class LivePlotter(Plotter):
             self._details_spec = outer[0, 2]
 
         self._simulator = SimulatorPanel(self.fig, self._sim_spec)
-        self._monty = MontyPanel(self.fig, self._monty_spec, self._channel_view)
+        self._monty = MontyPanel(
+            self.fig, self._monty_spec, self._channel_view, self._goal_trace
+        )
         self._details = DetailsPanel(
             self.fig,
             self._details_spec,
@@ -352,8 +356,10 @@ class LivePlotter(Plotter):
         else:
             if prev_step is None or step <= prev_step:
                 self._history.clear()
+                self._goal_trace.clear()
             history_step = step
         self._history.accumulate(self.model.learning_modules, history_step)
+        self._goal_trace.record(self.model.learning_modules)
         self._observe_jump(
             step, new_episode=prev_step is not None and step <= prev_step
         )

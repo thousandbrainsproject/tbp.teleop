@@ -25,6 +25,7 @@ from tbp.teleop.helpers import (
     ChannelView,
     EvidenceHistory,
     FeatureInset,
+    GoalTrace,
     corner_rect,
     draw_2d_segments,
     draw_buffer_series,
@@ -187,7 +188,13 @@ class MontyPanel:
     selection and per-channel features come from a `ChannelView`.
     """
 
-    def __init__(self, fig: Figure, spec, channel_view: ChannelView) -> None:
+    def __init__(
+        self,
+        fig: Figure,
+        spec,
+        channel_view: ChannelView,
+        goal_trace: GoalTrace,
+    ) -> None:
         """Bind the Monty column to its figure region and selection.
 
         Lays out the initial single 2D axis, matching the layout the placeholder and
@@ -197,10 +204,12 @@ class MontyPanel:
             fig: The figure to draw on.
             spec: The Monty column's gridspec subplot spec.
             channel_view: The selected LM/channel and per-channel feature accessors.
+            goal_trace: The per-LM, per-graph trace of past model-frame goal targets.
         """
         self.fig = fig
         self.spec = spec
         self.channel_view = channel_view
+        self.goal_trace = goal_trace
         self._ax = fig.add_subplot(spec)
         self._mode: str | None = "single"
         self._projection: str | None = None
@@ -259,7 +268,11 @@ class MontyPanel:
         retrieved. Planar graphs are drawn as edge-oriented segments; all other graphs
         as a 3D point cloud. When the displayed LM's goal generator holds a current
         hypothesis-testing goal targeting the drawn graph, the goal's model-frame
-        target location is marked as a green star labeled with the LM id.
+        target location is marked as a green dot labeled with the LM id; the LM's
+        earlier goals on the same graph are drawn beneath it as faint green dots. On
+        the step a goal is proposed, the hypothesis it was compared against (the
+        second most likely object, or the MLH object's second most likely pose) is
+        superimposed in light blue, posed relative to the MLH.
         """
         lm = self.channel_view.lm
         graph = None
@@ -313,6 +326,61 @@ class MontyPanel:
         if location is None or goal.info.get("model_frame_graph_id") != graph_id:
             return None
         return np.asarray(location, dtype=float), str(goal.sender_id)
+
+    def _past_goals(self, graph_id: str) -> npt.NDArray[np.float64]:
+        """The displayed LM's earlier goal targets on the drawn MLH graph.
+
+        Args:
+            graph_id: The id of the MLH graph being drawn.
+
+        Returns:
+            The `(K, 3)` model-frame goal targets the displayed LM proposed on this
+            graph this episode, including the current goal (drawn over it).
+        """
+        return self.goal_trace.locations(
+            self.channel_view.lm.learning_module_id, graph_id
+        )
+
+    def _second_hypothesis_overlay(
+        self, graph_id: str
+    ) -> tuple[npt.NDArray[np.float64], str] | None:
+        """The compared hypothesis's graph, posed in the drawn MLH graph's frame.
+
+        Only available on the step the displayed LM proposed a goal on the drawn
+        graph. The second hypothesis's graph is mapped from its learned frame to the
+        environment and then into the MLH graph's learned frame, i.e. the inverse of
+        `EvidenceGoalGenerator._transform_to_second_mlh_rf`, so it overlays the MLH
+        graph as the two hypotheses predict the objects would overlap in the world.
+
+        Args:
+            graph_id: The id of the MLH graph being drawn.
+
+        Returns:
+            The `(N, 3)` transformed node positions and a legend label, or `None`
+            when no goal was proposed on this graph this step.
+        """
+        lm = self.channel_view.lm
+        comparison = self.goal_trace.comparison_by_lm.get(lm.learning_module_id)
+        if comparison is None or comparison[0]["graph_id"] != graph_id:
+            return None
+        top, second = comparison
+        second_id = second["graph_id"]
+        channel = self._mlh_channel(second_id)
+        if channel is None:
+            return None
+        graph = lm.graph_memory.get_graph(second_id, channel)
+        if getattr(graph, "pos", None) is None or len(graph.pos) == 0:
+            return None
+        # MLH rotations map displacements into the model, so `.inv()` takes model
+        # coordinates to the environment.
+        env_pts = (
+            second["rotation"]
+            .inv()
+            .apply(np.asarray(graph.pos, dtype=float) - second["location"])
+        )
+        pts = top["rotation"].apply(env_pts) + top["location"]
+        label = "2nd pose" if second_id == graph_id else f"2nd object ({second_id})"
+        return pts, label
 
     def draw_feature_inset(self) -> None:
         """Draw the Monty section's "Input Feature" inset for the selected channel."""
@@ -440,7 +508,8 @@ class MontyPanel:
         """Render a 3D graph as a point cloud with the MLH location marked.
 
         When the displayed LM holds a current goal targeting this graph, its
-        model-frame target location is marked as a labeled green star.
+        model-frame target location is marked as a labeled green dot, over faint
+        green dots at the LM's earlier goal targets on this graph.
 
         Args:
             ax: The 3D Monty axis.
@@ -449,8 +518,22 @@ class MontyPanel:
             mlh_color: The MLH location marker color.
         """
         goal_marker = self._goal_in_model_frame(mlh["graph_id"])
+        past_goals = self._past_goals(mlh["graph_id"])
+        overlay = self._second_hypothesis_overlay(mlh["graph_id"])
         ax.cla()
         ax.scatter(pos[:, 1], pos[:, 0], pos[:, 2], c="black", s=2)
+        if overlay is not None:
+            second_pts, second_label = overlay
+            ax.scatter(
+                second_pts[:, 1],
+                second_pts[:, 0],
+                second_pts[:, 2],
+                c="lightskyblue",
+                s=3,
+                alpha=0.6,
+                label=second_label,
+                depthshade=False,
+            )
         ax.scatter(
             mlh["location"][1],
             mlh["location"][0],
@@ -458,18 +541,29 @@ class MontyPanel:
             c=mlh_color,
             s=15,
         )
+        if len(past_goals):
+            ax.scatter(
+                past_goals[:, 1],
+                past_goals[:, 0],
+                past_goals[:, 2],
+                c="limegreen",
+                alpha=0.3,
+                s=50,
+                label="past goals",
+                depthshade=False,
+            )
         if goal_marker is not None:
             location, sender = goal_marker
             ax.scatter(
                 location[1],
                 location[0],
                 location[2],
-                marker="*",
                 c="green",
-                s=80,
+                s=100,
                 label=f"goal ({sender})",
                 depthshade=False,
             )
+        if goal_marker is not None or len(past_goals) or overlay is not None:
             ax.legend(fontsize=7, loc="upper right")
         ax.set_title(f"MLH ({mlh['graph_id']})")
         ax.set_axis_off()
@@ -486,7 +580,8 @@ class MontyPanel:
         """Render a 2D SM graph as hsv-colored, edge-oriented segments.
 
         When the displayed LM holds a current goal targeting this graph, its
-        model-frame target location is marked as a labeled green star.
+        model-frame target location is marked as a labeled green dot, over faint
+        green dots at the LM's earlier goal targets on this graph.
 
         Args:
             ax: The 2D Monty axis.
@@ -496,6 +591,8 @@ class MontyPanel:
             mlh_color: The MLH location marker color.
         """
         goal_marker = self._goal_in_model_frame(mlh["graph_id"])
+        past_goals = self._past_goals(mlh["graph_id"])
+        overlay = self._second_hypothesis_overlay(mlh["graph_id"])
         ax.cla()
         x, y = pos[:, 0], pos[:, 1]
         fm = graph.feature_mapping
@@ -511,6 +608,19 @@ class MontyPanel:
             graph_feature.get("pose_vectors"),
         )
         draw_2d_segments(ax, x, y, colors, edge_mask, tangents)
+        if overlay is not None:
+            second_pts, second_label = overlay
+            ax.plot(
+                second_pts[:, 0],
+                second_pts[:, 1],
+                "o",
+                color="lightskyblue",
+                markersize=2,
+                alpha=0.6,
+                linestyle="none",
+                label=second_label,
+                zorder=2,
+            )
         ax.plot(
             mlh["location"][0],
             mlh["location"][1],
@@ -520,17 +630,30 @@ class MontyPanel:
             markeredgewidth=2,
             zorder=3,
         )
+        if len(past_goals):
+            ax.plot(
+                past_goals[:, 0],
+                past_goals[:, 1],
+                "o",
+                color="limegreen",
+                alpha=0.3,
+                markersize=5,
+                linestyle="none",
+                label="past goals",
+                zorder=3,
+            )
         if goal_marker is not None:
             location, sender = goal_marker
             ax.plot(
                 location[0],
                 location[1],
-                "*",
+                "o",
                 color="green",
-                markersize=12,
+                markersize=7,
                 label=f"goal ({sender})",
-                zorder=3,
+                zorder=4,
             )
+        if goal_marker is not None or len(past_goals) or overlay is not None:
             ax.legend(fontsize=7, loc="upper right")
         ax.set_title(f"MLH ({mlh['graph_id']})")
 
