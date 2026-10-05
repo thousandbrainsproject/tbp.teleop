@@ -86,7 +86,8 @@ class LivePlotter(Plotter):
     With `attention_vis` enabled, the three sections are compressed into a top row
     and a taller second row is added along the bottom with three attention-debugging
     panels: the salience map the model-free sensor module (e.g. `Vocus2` on a
-    `SalienceSM`) extracted this step as a heatmap, the `AttentionSystem`'s live voxel
+    `SalienceSM`) extracted this step as a heatmap, beside its inhibition-of-return
+    weights and the salience they leave behind, the `AttentionSystem`'s live voxel
     grid in 3D world space (rotatable by dragging and zoomable with the mouse wheel),
     and the segmented region proposed by that sensor module (e.g. `SlicMerge`)
     overlaid on its camera view. To make room, the "Input Feature" inset and the

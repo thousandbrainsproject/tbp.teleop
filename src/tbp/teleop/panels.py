@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 from matplotlib.gridspec import GridSpecFromSubplotSpec
+from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from tbp.monty.frameworks.models.two_d_sensor_module import TwoDSensorModule
 from tbp.monty.frameworks.sensors import SensorID
@@ -36,7 +37,9 @@ from tbp.teleop.helpers import (
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.backend_bases import MouseEvent
+    from matplotlib.colors import Colormap
     from matplotlib.figure import Figure
+    from matplotlib.image import AxesImage
     from tbp.monty.cmp import Goal
     from tbp.monty.frameworks.agents import AgentID
     from tbp.monty.frameworks.models.abstract_monty_classes import (
@@ -547,8 +550,8 @@ class MontyPanel:
                 past_goals[:, 0],
                 past_goals[:, 2],
                 c="limegreen",
-                alpha=0.3,
-                s=50,
+                alpha=0.8,
+                s=70,
                 label="past goals",
                 depthshade=False,
             )
@@ -559,7 +562,7 @@ class MontyPanel:
                 location[0],
                 location[2],
                 c="green",
-                s=100,
+                s=200,
                 label=f"goal ({sender})",
                 depthshade=False,
             )
@@ -1325,23 +1328,40 @@ class AttentionPanel:
 
 
 class SaliencePanel:
-    """The salience section: the salience map the model-free SM extracted this step.
+    """The salience section: the salience map and the effect of inhibition of return.
 
     Finds the sensor module carrying a salience strategy (e.g. `Vocus2` on a
-    `SalienceSM`) and reads the 2D salience map the module recorded in its telemetry,
-    so the heatmap shows exactly the map the module turned into goals this step. The
-    map is drawn as a heatmap with a colorbar, with the fixation point (image center)
-    marked. Maps already normalized to `[0, 1]` (the strategies' default) keep a fixed
-    color scale so frames are comparable; any other range is scaled per frame.
+    `SalienceSM`) and reads the 2D maps the module recorded in its telemetry for the
+    most recent step, drawn side by side as heatmaps with the fixation point (image
+    center) marked:
+
+    - Salience: the salience map the strategy extracted from the whole view. Maps
+      already normalized to `[0, 1]` (the strategies' default) keep a fixed color
+      scale so frames are comparable; any other range is scaled per frame.
+    - Inhibition of return: the IoR weight in `[0, 1]` at each on-object pixel, i.e.
+      how strongly the decaying kernels left at earlier fixations suppress it.
+    - After IoR: the on-object salience minus the IoR weights scaled by the module's
+      `ior_weight`, which is what the module turns into goal confidences (before
+      adding noise and range-normalizing). It shares the salience's `[0, 1]` scale,
+      so fixated spots go dark; values pushed below zero are clipped (shown by the
+      colorbar's extension). The inhibited region (IoR weight above
+      `IOR_CONTOUR_LEVEL`) is outlined so small inhibited spots stay findable.
+
+    Off-object pixels carry no IoR (goals are only proposed on the object), so they
+    are drawn in a neutral gray in the IoR panels.
 
     The sensor module only records when configured with `save_raw_obs=true` (which
     installs a recording `SalienceSMTelemetry` rather than the no-op one, detected here
     by the telemetry carrying the recorded list), so the panel explains that
     requirement instead of drawing when it is off. It likewise shows a placeholder when
-    no sensor module has a salience strategy.
+    no sensor module has a salience strategy, and in the IoR panels when the
+    telemetry predates IoR recording.
     """
 
     CMAP: ClassVar[str] = "inferno"
+    IOR_CMAP: ClassVar[str] = "Blues"
+    OFF_OBJECT_COLOR: ClassVar[str] = "0.5"
+    IOR_CONTOUR_LEVEL: ClassVar[float] = 0.05
 
     def __init__(self, fig: Figure, spec, model: Monty) -> None:
         """Bind the panel to its axes and resolve the salience sensor module.
@@ -1353,13 +1373,18 @@ class SaliencePanel:
                 strategy.
         """
         self.fig = fig
-        self._ax = fig.add_subplot(spec)
-        # A divider-managed colorbar axis hugs the (square, equal-aspect) heatmap
-        # rather than the far edge of the wider cell, and is created once so redraws
-        # don't accumulate colorbars.
-        self._cax = make_axes_locatable(self._ax).append_axes(
-            "right", size="5%", pad=0.08
+        grid = GridSpecFromSubplotSpec(1, 3, subplot_spec=spec, wspace=0.2)
+        self._salience_ax, self._ior_ax, self._inhibited_ax = (
+            fig.add_subplot(grid[0, i]) for i in range(3)
         )
+        # Divider-managed colorbar axes hug the (square, equal-aspect) heatmaps
+        # rather than the cell edges, and are created once so redraws don't
+        # accumulate colorbars. They sit below the heatmaps so the three maps keep
+        # the full width of the narrow cell.
+        self._caxes = {
+            ax: make_axes_locatable(ax).append_axes("bottom", size="6%", pad=0.05)
+            for ax in (self._salience_ax, self._ior_ax, self._inhibited_ax)
+        }
         self._sm = next(
             (
                 sm
@@ -1370,32 +1395,53 @@ class SaliencePanel:
         )
 
     def draw(self) -> None:
-        """Draw the salience heatmap recorded for the most recent step."""
-        ax = self._ax
-        ax.cla()
-        ax.set_axis_off()
-        self._cax.cla()
-        self._cax.set_axis_off()
+        """Draw the salience and IoR heatmaps recorded for the most recent step."""
+        for ax, cax in self._caxes.items():
+            ax.cla()
+            ax.set_axis_off()
+            cax.cla()
+            cax.set_axis_off()
         if self._sm is None:
-            self._draw_placeholder("no salience strategy configured")
+            self._draw_placeholder(self._salience_ax, "no salience strategy configured")
             return
         telemetry = self._sm._snapshot_telemetry
         maps = getattr(telemetry, "salience_maps", None)
         if maps is None:
             # The no-op telemetry carries no recorded lists at all.
             self._draw_placeholder(
+                self._salience_ax,
                 "Salience view disabled:\n"
                 f"set save_raw_obs=true on sensor module "
-                f"{self._sm.sensor_module_id!r}\nso it records its salience maps"
+                f"{self._sm.sensor_module_id!r}\nso it records its salience maps",
             )
             return
         if not maps:
-            self._draw_placeholder("no salience map recorded yet")
+            self._draw_placeholder(self._salience_ax, "no salience map recorded yet")
             return
 
-        salience = np.asarray(maps[-1], dtype=float)
+        self._draw_salience(np.asarray(maps[-1], dtype=float))
+
+        ior_maps = getattr(telemetry, "ior_maps", None)
+        inhibited_maps = getattr(telemetry, "inhibited_salience_maps", None)
+        if not ior_maps or not inhibited_maps:
+            for ax in (self._ior_ax, self._inhibited_ax):
+                self._draw_placeholder(ax, "no IoR recorded")
+            return
+        ior = np.asarray(ior_maps[-1], dtype=float)
+        self._draw_ior(ior)
+        self._draw_inhibited(np.asarray(inhibited_maps[-1], dtype=float), ior)
+
+    def _draw_salience(self, salience: npt.NDArray[np.float64]) -> None:
+        """Draw the raw salience map.
+
+        Args:
+            salience: The 2D salience map.
+        """
+        ax = self._salience_ax
         strategy_name = type(self._sm._salience_strategy).__name__
-        ax.set_title(f"Salience map ({strategy_name} on {self._sm.sensor_module_id})")
+        ax.set_title(
+            f"Salience\n({strategy_name} on {self._sm.sensor_module_id})", fontsize=8
+        )
         # The strategies range-normalize to [0, 1] by default; keep that scale fixed
         # across frames so the same color means the same salience from step to step.
         finite = salience[np.isfinite(salience)]
@@ -1404,27 +1450,111 @@ class SaliencePanel:
         else:
             vmin, vmax = None, None
         image = ax.imshow(salience, cmap=self.CMAP, vmin=vmin, vmax=vmax)
-        self._cax.set_axis_on()
-        self.fig.colorbar(image, cax=self._cax)
-        self._cax.tick_params(labelsize=7)
-        # The salience sensor module fixates at the image center.
-        h, w = salience.shape[:2]
-        ax.plot(w // 2, h // 2, "+", color="cyan", markersize=10, markeredgewidth=2)
+        self._draw_colorbar(ax, image)
+        self._mark_fixation(ax, salience.shape, "cyan")
 
-    def _draw_placeholder(self, message: str) -> None:
-        """Show a centered message in place of the heatmap.
+    def _draw_ior(self, ior: npt.NDArray[np.float64]) -> None:
+        """Draw the inhibition-of-return weights.
 
         Args:
+            ior: The 2D IoR weights, NaN off-object.
+        """
+        ax = self._ior_ax
+        finite = ior[np.isfinite(ior)]
+        peak = float(finite.max()) if finite.size else 0.0
+        ax.set_title(f"Inhibition of return\n(max {peak:.2f})", fontsize=8)
+        image = ax.imshow(
+            ior, cmap=self._with_off_object(self.IOR_CMAP), vmin=0, vmax=1
+        )
+        self._draw_colorbar(ax, image)
+        self._mark_fixation(ax, ior.shape, "red")
+
+    def _draw_inhibited(
+        self, inhibited: npt.NDArray[np.float64], ior: npt.NDArray[np.float64]
+    ) -> None:
+        """Draw the on-object salience left after inhibition of return.
+
+        Args:
+            inhibited: The 2D inhibited salience, NaN off-object.
+            ior: The 2D IoR weights, NaN off-object, outlined over the map.
+        """
+        ax = self._inhibited_ax
+        ior_weight = getattr(self._sm, "_ior_weight", None)
+        suffix = f"\n(ior_weight {ior_weight:g})" if ior_weight is not None else ""
+        ax.set_title(f"Salience after IoR{suffix}", fontsize=8)
+        image = ax.imshow(
+            inhibited, cmap=self._with_off_object(self.CMAP), vmin=0, vmax=1
+        )
+        self._draw_colorbar(ax, image, extend="min")
+        inhibited_region = np.nan_to_num(ior, nan=0.0)
+        if inhibited_region.max() > self.IOR_CONTOUR_LEVEL:
+            ax.contour(
+                inhibited_region,
+                levels=[self.IOR_CONTOUR_LEVEL],
+                colors="deepskyblue",
+                linewidths=0.8,
+            )
+        self._mark_fixation(ax, inhibited.shape, "cyan")
+
+    def _with_off_object(self, name: str) -> Colormap:
+        """A copy of a colormap that draws NaN (off-object) pixels in gray.
+
+        Args:
+            name: The colormap name.
+
+        Returns:
+            The colormap with its "bad" color set to `OFF_OBJECT_COLOR`.
+        """
+        cmap = plt.get_cmap(name).copy()
+        cmap.set_bad(self.OFF_OBJECT_COLOR)
+        return cmap
+
+    def _draw_colorbar(
+        self, ax: Axes, image: AxesImage, extend: str = "neither"
+    ) -> None:
+        """Draw a heatmap's horizontal colorbar in its divider axis below it.
+
+        Args:
+            ax: The heatmap axis.
+            image: The heatmap.
+            extend: Which colorbar ends to extend, marking clipped values.
+        """
+        cax = self._caxes[ax]
+        cax.set_axis_on()
+        self.fig.colorbar(image, cax=cax, orientation="horizontal", extend=extend)
+        # Few ticks, so neighboring colorbars' end labels don't run together.
+        cax.xaxis.set_major_locator(MaxNLocator(nbins=2))
+        cax.tick_params(labelsize=6)
+
+    @staticmethod
+    def _mark_fixation(ax: Axes, shape: tuple[int, ...], color: str) -> None:
+        """Mark the fixation point; the salience sensor module fixates the center.
+
+        Args:
+            ax: The heatmap axis.
+            shape: The heatmap's shape.
+            color: The marker color.
+        """
+        h, w = shape[:2]
+        ax.plot(w // 2, h // 2, "+", color=color, markersize=8, markeredgewidth=1.5)
+
+    @staticmethod
+    def _draw_placeholder(ax: Axes, message: str) -> None:
+        """Show a centered message in place of a heatmap.
+
+        Args:
+            ax: The heatmap axis to write in.
             message: The text to display.
         """
-        self._ax.text(
+        ax.text(
             0.5,
             0.5,
             message,
             ha="center",
             va="center",
             wrap=True,
-            transform=self._ax.transAxes,
+            fontsize=8,
+            transform=ax.transAxes,
         )
 
 
