@@ -61,9 +61,11 @@ class LivePlotter(Plotter):
 
     Renders a 3-section view of the selected input channel of the displayed
     learning module. You can switch both the displayed learning module and the selected
-    input channel at runtime with two cycling buttons under the `Step N` title. The
-    learning module and channel are discovered from the model rather than configured by
-    id.
+    input channel at runtime with two cycling buttons under the `Step N` title; the
+    channel button cycles through every channel the LM has received input on or
+    models in any of its graphs. The learning module and channel are discovered from
+    the model rather than configured by id. A badge in the Monty section's corner shows
+    whether the selected channel has received input this episode and on this step.
 
     - Simulator: view finder and RGB patch of the sensor module feeding the selected
       (or, for an LM channel, the displayed LM's first sensor) channel.
@@ -476,6 +478,7 @@ class LivePlotter(Plotter):
             self._draw_training()
         else:
             self._draw_inference()
+        self._monty.draw_input_status()
 
         if self.attention_vis:
             self._salience.draw()

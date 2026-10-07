@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import matplotlib as mpl
@@ -32,6 +33,7 @@ from typing_extensions import Self
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
+    from tbp.monty.cmp import Message
     from tbp.monty.frameworks.models.abstract_monty_classes import (
         LearningModule,
         Monty,
@@ -648,6 +650,24 @@ class SpreadTrace:
         return None
 
 
+@dataclass(frozen=True)
+class ChannelInputStatus:
+    """The input a learning module has received on one channel this episode.
+
+    Attributes:
+        received_this_episode: Whether the channel has had any (passed) input.
+        steps_since_input: How many Monty steps ago the channel last had input (0
+            for the latest step), or `None` when unknown or never.
+        current_input: A description of the latest step's input on the channel
+            (the object ID for a learning-module channel), or `None` when the
+            channel had no input on the latest step.
+    """
+
+    received_this_episode: bool
+    steps_since_input: int | None
+    current_input: str | None
+
+
 class ChannelView:
     """The selected learning module and input channel, with channel resolution.
 
@@ -688,10 +708,14 @@ class ChannelView:
     def cycle_channel(self) -> bool:
         """Advance to the next input channel of the displayed LM.
 
+        Cycles through every channel the displayed LM has received input on this
+        episode or stores in any of its graphs, so a channel's graph can be viewed
+        before its first input.
+
         Returns:
             True when the channel advanced, False when the displayed LM has no channels.
         """
-        channels = self.lm_channels()
+        channels = self.all_channels()
         if not channels:
             return False
         if self.channel in channels:
@@ -712,6 +736,84 @@ class ChannelView:
             channel: The channel to select.
         """
         self.channel = channel
+
+    def all_channels(self) -> list[str]:
+        """Return every input channel of the displayed LM.
+
+        Returns:
+            The channels seen in the displayed LM's buffer, in observation order,
+            followed by any other channels stored in its graphs.
+        """
+        channels = self.lm_channels()
+        memory = getattr(self.lm, "graph_memory", None)
+        if memory is None:
+            return channels
+        for graph_id in memory.get_memory_ids():
+            for channel in self.lm.get_input_channels_in_graph(graph_id):
+                if channel not in channels:
+                    channels.append(channel)
+        return channels
+
+    def input_status(self, channel: str) -> ChannelInputStatus:
+        """Summarize the input the displayed LM has received on a channel.
+
+        The LM's buffer records, for every Monty step of the episode, whether the LM
+        processed input on it, and the (passed) input messages of each processed
+        step, so the two are aligned.
+
+        Args:
+            channel: The input channel.
+
+        Returns:
+            Whether the channel has had input this episode, how many steps ago it
+            last did, and what it received on the latest step.
+        """
+        buffer = self.lm.buffer
+        processed = np.nonzero(buffer.stats.get("lm_processed_steps", []))[0]
+        percepts_per_step = buffer.input_percepts
+        num_steps = len(buffer.stats.get("lm_processed_steps", []))
+        if len(processed) != len(percepts_per_step):
+            # Unaligned (e.g. a learning module with its own buffer bookkeeping), so
+            # fall back to the inputs alone, without step timing.
+            processed = np.full(len(percepts_per_step), -1)
+        last_step = None
+        current = None
+        for step, percepts in zip(processed[::-1], percepts_per_step[::-1]):
+            message = next((p for p in percepts if p.sender_id == channel), None)
+            if message is None:
+                continue
+            last_step = int(step)
+            if step >= 0 and step == num_steps - 1:
+                current = message
+            break
+        return ChannelInputStatus(
+            received_this_episode=last_step is not None,
+            steps_since_input=(
+                num_steps - 1 - last_step
+                if last_step is not None and last_step >= 0
+                else None
+            ),
+            current_input=(
+                self._describe_input(channel, current) if current is not None else None
+            ),
+        )
+
+    def _describe_input(self, channel: str, message: Message) -> str:
+        """Describe an input message: the object ID for a learning-module channel.
+
+        Args:
+            channel: The channel the message was received on.
+            message: The received message.
+
+        Returns:
+            The name of the object passed on a learning-module channel, else a
+            generic description of sensory input.
+        """
+        object_id = (message.non_morphological_features or {}).get("object_id")
+        if object_id is None:
+            return "sensory input"
+        feature = int(np.asarray(object_id).flatten()[0])
+        return self.object_id_names(channel).get(feature, f"object {feature}")
 
     def channel_sender_type(self, channel: str | None) -> str | None:
         """Whether a channel is fed by a sensor module or a learning module.
@@ -1153,6 +1255,10 @@ class FeatureInset:
     def _draw_lm_name(self, rect: list[float], channel: str) -> None:
         """Show the name of the object being passed on a learning-module channel.
 
+        The source LM's most likely object is shown even when it was not passed on
+        the latest step (e.g. before the source LM has converged), in which case
+        it is greyed out and marked as not passed.
+
         Args:
             rect: The `[left, bottom, width, height]` inset rectangle.
             channel: The learning-module channel.
@@ -1166,7 +1272,18 @@ class FeatureInset:
             graph_id = mlh.get("graph_id") if mlh else None
             if graph_id and graph_id != "no_observations_yet":
                 name = str(graph_id)
-        ax.text(0.5, 0.5, name, ha="center", va="center", transform=ax.transAxes)
+        passed = self.channel_view.input_status(channel).current_input is not None
+        if not passed:
+            name = f"{name}\n(not passed)"
+        ax.text(
+            0.5,
+            0.5,
+            name,
+            ha="center",
+            va="center",
+            color="black" if passed else "0.55",
+            transform=ax.transAxes,
+        )
 
     def _draw_message(self, message: str) -> None:
         """Clear the inset and show a centered message.

@@ -280,6 +280,13 @@ class MontyPanel:
     (a matplotlib axis cannot switch between 2D and 3D in place), to avoid flicker. The
     selection and per-channel features come from a `ChannelView`.
 
+    During a matching step the drawn graph is always the selected channel's model of
+    the MLH object, whether or not that channel has received input yet (the MLH
+    location is shared by all of an object's channel models); when the MLH object has
+    no model of the selected channel, a placeholder says so. A badge in the corner
+    states whether the selected channel has received input this episode and on the
+    latest step (with the object ID, for a learning-module channel).
+
     When the displayed LM's goal generator inhibits child objects (a
     `ChildObjectsGoalGenerator`), an "Inhibition" button in the corner of the MLH
     view toggles coloring the drawn graph's nodes by their inhibition weight. While
@@ -329,6 +336,49 @@ class MontyPanel:
         self._inhibition_button = self._build_inhibition_button()
         self._spread_slider: Slider | None = None
         self._slider_record: SpreadRecord | None = None
+        monty = spec.get_position(fig)
+        self._status_badge = fig.text(
+            monty.x1,
+            monty.y0 + 0.005,
+            "",
+            ha="right",
+            va="bottom",
+            fontsize=8,
+            zorder=10,
+            visible=False,
+        )
+
+    def draw_input_status(self) -> None:
+        """Show what input the displayed LM has received on the selected channel.
+
+        A badge in the bottom-right corner of the Monty column states whether the
+        channel has had input this episode (and how long ago) and what it received
+        on the latest step (the object ID, for a learning-module channel). It is
+        green when the channel had input on the latest step, amber when it only
+        had input earlier, and grey when it has had none this episode.
+        """
+        channel = self.channel_view.channel
+        if channel is None:
+            self._status_badge.set_visible(False)
+            return
+        status = self.channel_view.input_status(channel)
+        if status.current_input is not None:
+            episode = "episode: input received"
+            color = "#c8f0c0"
+        elif status.received_this_episode:
+            episode = "episode: input received"
+            if status.steps_since_input is not None:
+                episode += f" ({status.steps_since_input} steps ago)"
+            color = "#ffe2a8"
+        else:
+            episode = "episode: no input yet"
+            color = "0.9"
+        latest = f"this step: {status.current_input or 'no input'}"
+        self._status_badge.set_text(f"{episode}\n{latest}")
+        self._status_badge.set_bbox(
+            {"boxstyle": "round,pad=0.35", "facecolor": color, "edgecolor": "0.5"}
+        )
+        self._status_badge.set_visible(True)
 
     def draw_placeholder(self, message: str) -> None:
         """Draw a centered placeholder message in the Monty panel.
@@ -400,6 +450,7 @@ class MontyPanel:
         lm = self.channel_view.lm
         graph = None
         channel = None
+        message = "No MLH"
         mlh = lm._get_current_mlh()
         if mlh and mlh.get("graph_id") not in (None, "no_observations_yet"):
             graph_id = mlh["graph_id"]
@@ -407,13 +458,17 @@ class MontyPanel:
                 channel = self._mlh_channel(graph_id)
                 if channel is not None:
                     graph = lm.graph_memory.get_graph(graph_id, channel)
+                else:
+                    message = (
+                        f"MLH ({graph_id}) has no model of {self.channel_view.channel}"
+                    )
 
         if (
             graph is None
             or getattr(graph, "pos", None) is None
             or len(np.asarray(graph.pos)) == 0
         ):
-            self.draw_placeholder("No MLH")
+            self.draw_placeholder(message)
             self._inhibition_button.ax.set_visible(self._inhibition_gsg() is not None)
             return
         pos = np.asarray(graph.pos)
@@ -769,13 +824,15 @@ class MontyPanel:
             graph_id: The MLH graph id.
 
         Returns:
-            The selected channel when it is part of the graph, else the graph's first
-            sensor-module channel, else `None` when the graph has no sensor channel.
+            The selected channel when it is part of the graph, else `None` when it is
+            not (the graph has no model of that channel). With no channel selected
+            yet, the graph's first sensor-module channel (or `None` without one).
         """
         lm = self.channel_view.lm
         channels = lm.get_input_channels_in_graph(graph_id)
-        if self.channel_view.channel in channels:
-            return self.channel_view.channel
+        selected = self.channel_view.channel
+        if selected is not None:
+            return selected if selected in channels else None
         sender_types = lm.buffer.channel_sender_types
         sm_channels = [c for c in channels if sender_types.get(c) == "SM"]
         return sm_channels[0] if sm_channels else None
