@@ -708,6 +708,7 @@ class DetailsPanel:
         self._evidence_history: dict[str, list[float]] = {}
         self._num_hyp_history: dict[str, list[float]] = {}
         self._burst_steps: list[int] = []
+        self._terminal_flags: list[bool] = []
 
     def draw_buffer_grid(
         self, channels: list[str], points: dict[str, npt.NDArray[np.float64]]
@@ -745,6 +746,7 @@ class DetailsPanel:
             "Highest evidence per object",
             "evidence",
         )
+        self._shade_terminal_steps(self._evidence_ax)
         if self.show_num_hypotheses:
             self._draw_object_series(
                 self._num_hyp_ax,
@@ -884,6 +886,36 @@ class DetailsPanel:
         self._evidence_history = self.history.evidence_by_lm.setdefault(lm_id, {})
         self._num_hyp_history = self.history.num_hyp_by_lm.setdefault(lm_id, {})
         self._burst_steps = self.history.burst_steps_by_lm.setdefault(lm_id, [])
+        self._terminal_flags = self.history.terminal_by_lm.setdefault(lm_id, [])
+
+    def _shade_terminal_steps(self, ax: Axes) -> None:
+        """Shade the steps at which the displayed LM is in its "match" terminal state.
+
+        Each contiguous run of matching steps is filled as one vertical band spanning
+        half a step either side of the run, so a single matching step is still
+        visible. A run ends where the LM drops out of its terminal state, leaving the
+        non-matching steps unshaded.
+
+        Args:
+            ax: The axis to shade.
+        """
+        run_start = None
+        labeled = False
+        for i, is_terminal in enumerate([*self._terminal_flags, False]):
+            if is_terminal and run_start is None:
+                run_start = i
+            elif not is_terminal and run_start is not None:
+                ax.axvspan(
+                    self._evidence_steps[run_start] - 0.5,
+                    self._evidence_steps[i - 1] + 0.5,
+                    color="blue",
+                    alpha=0.15,
+                    linewidth=0,
+                    zorder=0,
+                    label=None if labeled else "terminal condition met",
+                )
+                labeled = True
+                run_start = None
 
     def _draw_object_series(
         self,

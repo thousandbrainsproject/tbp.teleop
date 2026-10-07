@@ -357,6 +357,9 @@ class EvidenceHistory:
         self.evidence_by_lm: dict[str, dict[str, list[float]]] = {}
         self.num_hyp_by_lm: dict[str, dict[str, list[float]]] = {}
         self.burst_steps_by_lm: dict[str, list[int]] = {}
+        # Aligned with `steps_by_lm`: whether the LM was in its "match" terminal state
+        # (and so eligible to pass its output up the hierarchy) at each recorded step.
+        self.terminal_by_lm: dict[str, list[bool]] = {}
         self._last_accumulated_step: int | None = None
 
     def clear(self) -> None:
@@ -365,6 +368,7 @@ class EvidenceHistory:
         self.evidence_by_lm.clear()
         self.num_hyp_by_lm.clear()
         self.burst_steps_by_lm.clear()
+        self.terminal_by_lm.clear()
         self._last_accumulated_step = None
 
     def accumulate(self, learning_modules: list[LearningModule], step: int) -> None:
@@ -411,7 +415,9 @@ class EvidenceHistory:
 
         One series per object id with a non-empty hypothesis space; objects appearing
         late are NaN-backfilled so every series aligns to the LM's step list. Steps with
-        a sampling burst are recorded for vertical markers.
+        a sampling burst are recorded for vertical markers, and whether the LM is in
+        its "match" terminal state is recorded for every step. The terminal state can
+        revert to None when the LM loses its unique match, so it is re-read each step.
 
         Args:
             lm: The learning module whose current state is recorded.
@@ -431,8 +437,10 @@ class EvidenceHistory:
         evidence_history = self.evidence_by_lm.setdefault(lm_id, {})
         num_hyp_history = self.num_hyp_by_lm.setdefault(lm_id, {})
         burst_steps = self.burst_steps_by_lm.setdefault(lm_id, [])
+        terminal = self.terminal_by_lm.setdefault(lm_id, [])
 
         steps.append(step)
+        terminal.append(lm.terminal_state == "match")
         n = len(steps)
         for graph_id in graph_ids:
             if graph_id not in evidence_history:
