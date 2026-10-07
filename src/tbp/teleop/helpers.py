@@ -693,9 +693,9 @@ class ChannelView:
 
         A learning-module channel carries each point's object as a numeric `object_id`
         feature (a hash of the object name). The source learning module knows the names
-        of the objects it has learned, so re-hashing each known name inverts the feature
-        and recovers the human-readable name shown in the legend, matching the text in
-        the "Input Feature" inset.
+        of the objects it has learned, so re-hashing each known name with the LM's own
+        `_object_id_to_features` inverts the feature and recovers the human-readable
+        name shown in the legend, matching the text in the "Input Feature" inset.
 
         Args:
             channel: The buffer input channel being colored.
@@ -708,7 +708,7 @@ class ChannelView:
         if not isinstance(source_lm, EvidenceGraphLM):
             return {}
         return {
-            sum(ord(c) for c in graph_id): graph_id
+            source_lm._object_id_to_features(graph_id): graph_id
             for graph_id in source_lm.graph_memory.get_memory_ids()
         }
 
