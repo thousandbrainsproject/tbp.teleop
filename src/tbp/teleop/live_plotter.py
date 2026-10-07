@@ -28,6 +28,7 @@ from tbp.teleop.helpers import (
     ChannelView,
     EvidenceHistory,
     GoalTrace,
+    SpreadTrace,
     draw_section_dividers,
     is_interactive_backend,
 )
@@ -100,7 +101,17 @@ class LivePlotter(Plotter):
     matching-step MLH view marks the displayed LM's current goal target on the
     hypothesized model, over a faint trace of its earlier goals on that model; and a
     red top-right banner reports for a few steps when a goal was unsuccessful because
-    no object was visible at its location and Monty moved back.
+    no object was visible at its location and Monty moved back. A goal whose target
+    was selected from a particular input channel's graph (e.g. a child object's
+    learning-module channel) is only drawn on that channel's graph, and when the
+    displayed LM proposes such a goal, the selected channel switches to it.
+
+    When the displayed LM's goal generator inhibits explained child objects (a
+    `ChildObjectsGoalGenerator`), an "Inhibition" button on the MLH view toggles
+    coloring the drawn graph's nodes by their inhibition weight. While it is on, a
+    step on which the LM spread inhibition switches the selected channel to the
+    channel it spread through (taking precedence over following a new goal), and a
+    temporary slider along the bottom of the figure replays the spread node by node.
     """
 
     _channel_view: ChannelView
@@ -139,6 +150,8 @@ class LivePlotter(Plotter):
         self.max_delay = max_delay
         self.figsize = figsize
         self.attention_vis = attention_vis
+        # Persists across episodes, unlike the per-episode figure and its widgets.
+        self._show_inhibition = False
 
         self.fig = None
         self._controls = None
@@ -204,6 +217,7 @@ class LivePlotter(Plotter):
         )
         self._history = EvidenceHistory()
         self._goal_trace = GoalTrace()
+        self._spread_trace = SpreadTrace()
         self._last_observations = None
         self._last_step = None
         self._supervised_lm_ids = supervised_lm_ids
@@ -283,7 +297,13 @@ class LivePlotter(Plotter):
 
         self._simulator = SimulatorPanel(self.fig, self._sim_spec)
         self._monty = MontyPanel(
-            self.fig, self._monty_spec, self._channel_view, self._goal_trace
+            self.fig,
+            self._monty_spec,
+            self._channel_view,
+            self._goal_trace,
+            self._spread_trace,
+            show_inhibition=self._show_inhibition,
+            on_toggle_inhibition=self._on_toggle_inhibition,
         )
         self._details = DetailsPanel(
             self.fig,
@@ -358,12 +378,15 @@ class LivePlotter(Plotter):
             if prev_step is None or step <= prev_step:
                 self._history.clear()
                 self._goal_trace.clear()
+                self._spread_trace.clear()
             history_step = step
         self._history.accumulate(self.model.learning_modules, history_step)
         self._goal_trace.record(self.model.learning_modules)
+        self._spread_trace.record(self.model.learning_modules)
         self._observe_jump(
             step, new_episode=prev_step is not None and step <= prev_step
         )
+        self._follow_new_activity()
         self._render(observations, step)
         if not self.interactive:
             self._controls.pause()
@@ -392,6 +415,46 @@ class LivePlotter(Plotter):
         elif self._banner_until is not None and step > self._banner_until:
             self._banner_message = None
             self._banner_until = None
+
+    def _follow_new_activity(self) -> None:
+        """Select the channel of the displayed LM's latest spread or new goal.
+
+        While inhibition is shown, a spread on the latest step selects the channel it
+        spread through (keeping the selected channel when it is one of them).
+        Otherwise a new goal selects the channel its target was selected from. Only
+        applies while the displayed LM is matching, and never re-selects on a repaint.
+        """
+        lm = self._channel_view.lm
+        if self._lm_building_graph(lm):
+            return
+        lm_id = lm.learning_module_id
+        channel = None
+        spreads = self._spread_trace.records_by_lm.get(lm_id)
+        if self._show_inhibition and spreads:
+            channels = [record.input_channel for record in spreads]
+            if self._channel_view.channel not in channels:
+                channel = channels[0]
+        else:
+            channel = self._goal_trace.new_goal_channel_by_lm.get(lm_id)
+        if channel is not None and channel != self._channel_view.channel:
+            self._channel_view.select_channel(channel)
+            self._selector.refresh_labels()
+
+    def _on_toggle_inhibition(self, show: bool) -> None:
+        """Show or hide inhibition weights, following this step's spread if shown.
+
+        Args:
+            show: Whether inhibition weights are now shown.
+        """
+        self._show_inhibition = show
+        if show:
+            lm_id = self._channel_view.lm.learning_module_id
+            spreads = self._spread_trace.records_by_lm.get(lm_id, [])
+            channels = [record.input_channel for record in spreads]
+            if channels and self._channel_view.channel not in channels:
+                self._channel_view.select_channel(channels[0])
+                self._selector.refresh_labels()
+        self._redraw()
 
     def _render(self, observations: Observations, step: int) -> None:
         """Draw every section for one frame.

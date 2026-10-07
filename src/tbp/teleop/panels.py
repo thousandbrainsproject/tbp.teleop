@@ -9,13 +9,15 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, ClassVar
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable, ClassVar
 
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 from matplotlib.gridspec import GridSpecFromSubplotSpec
 from matplotlib.ticker import MaxNLocator
+from matplotlib.widgets import Button, Slider
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from tbp.monty.frameworks.models.two_d_sensor_module import TwoDSensorModule
 from tbp.monty.frameworks.sensors import SensorID
@@ -27,6 +29,7 @@ from tbp.teleop.helpers import (
     EvidenceHistory,
     FeatureInset,
     GoalTrace,
+    SpreadTrace,
     corner_rect,
     draw_2d_segments,
     draw_buffer_series,
@@ -48,7 +51,94 @@ if TYPE_CHECKING:
         Observations,
         SensorModule,
     )
+    from tbp.monty.frameworks.models.goal_generation import SpreadRecord
     from tbp.monty.frameworks.models.object_model import GraphObjectModel
+
+# Figure-fraction rectangle of the spread replay slider along the figure's bottom
+# edge, below the interactive buttons and the speed slider.
+SPREAD_SLIDER_BOTTOM, SPREAD_SLIDER_HEIGHT = 0.012, 0.022
+
+
+@dataclass(frozen=True)
+class _NodeHighlights:
+    """Nodes of the drawn MLH graph to color over its point cloud.
+
+    Attributes:
+        replay: The nodes a replayed spread has reached so far, in the order they
+            were reached, or `None` when no spread is being replayed.
+        replay_total: The number of nodes the replayed spread reached in total.
+        replay_label: The legend label of the replayed spread.
+        weights: The inhibition weight of every node, or `None` when not shown. Only
+            drawn when no spread is being replayed.
+    """
+
+    replay: npt.NDArray[np.int_] | None
+    replay_total: int
+    replay_label: str | None
+    weights: npt.NDArray[np.float64] | None
+
+    def draw(self, ax: Axes, pos: npt.NDArray[np.float64], *, three_d: bool) -> bool:
+        """Color the highlighted nodes on the MLH axis.
+
+        Args:
+            ax: The MLH axis.
+            pos: The graph node positions, shape `(N, 3)`.
+            three_d: Whether `ax` is the 3D view, which plots `(y, x, z)`, rather
+                than the 2D view, which plots `(x, y)`.
+
+        Returns:
+            Whether anything with a legend label was drawn.
+        """
+
+        def coords(points: npt.NDArray[np.float64]) -> tuple:
+            points = np.atleast_2d(points)
+            if three_d:
+                return points[:, 1], points[:, 0], points[:, 2]
+            return points[:, 0], points[:, 1]
+
+        extra = {"depthshade": False} if three_d else {}
+        if self.replay is not None:
+            if len(self.replay) == 0:
+                return False
+            ax.scatter(
+                *coords(pos[self.replay]),
+                c=np.arange(len(self.replay)),
+                cmap="viridis",
+                vmin=0,
+                vmax=max(self.replay_total - 1, 1),
+                s=12,
+                label=f"{self.replay_label} ({len(self.replay)}/{self.replay_total})",
+                zorder=4,
+                **extra,
+            )
+            ax.scatter(
+                *coords(pos[self.replay[-1]]),
+                facecolors="none",
+                edgecolors="magenta",
+                s=90,
+                linewidths=1.5,
+                zorder=5,
+                **extra,
+            )
+            return True
+        if self.weights is None:
+            return False
+        inhibited = np.nonzero(self.weights > 0)[0]
+        if len(inhibited) == 0:
+            return False
+        ax.scatter(
+            *coords(pos[inhibited]),
+            c=self.weights[inhibited],
+            cmap="Reds",
+            # Start the colormap below 0 so nearly decayed nodes stay visible.
+            vmin=-0.5,
+            vmax=1.0,
+            s=10,
+            label=f"inhibited ({len(inhibited)})",
+            zorder=4,
+            **extra,
+        )
+        return True
 
 
 class SimulatorPanel:
@@ -189,6 +279,13 @@ class MontyPanel:
     a centered placeholder. Axes are rebuilt only when the layout or projection changes
     (a matplotlib axis cannot switch between 2D and 3D in place), to avoid flicker. The
     selection and per-channel features come from a `ChannelView`.
+
+    When the displayed LM's goal generator inhibits child objects (a
+    `ChildObjectsGoalGenerator`), an "Inhibition" button in the corner of the MLH
+    view toggles coloring the drawn graph's nodes by their inhibition weight. While
+    it is on, and the LM spread inhibition through the drawn graph on the latest
+    step, a temporary slider along the bottom of the figure replays that spread, from
+    the first node it reached to the last.
     """
 
     def __init__(
@@ -197,27 +294,41 @@ class MontyPanel:
         spec,
         channel_view: ChannelView,
         goal_trace: GoalTrace,
+        spread_trace: SpreadTrace,
+        *,
+        show_inhibition: bool,
+        on_toggle_inhibition: Callable[[bool], None],
     ) -> None:
         """Bind the Monty column to its figure region and selection.
 
         Lays out the initial single 2D axis, matching the layout the placeholder and
-        inference 2D views start from.
+        inference 2D views start from, and the (initially hidden) inhibition button.
 
         Args:
             fig: The figure to draw on.
             spec: The Monty column's gridspec subplot spec.
             channel_view: The selected LM/channel and per-channel feature accessors.
             goal_trace: The per-LM, per-graph trace of past model-frame goal targets.
+            spread_trace: The inhibition spreads of the latest step.
+            show_inhibition: Whether inhibition weights start out shown.
+            on_toggle_inhibition: Called with the new state when the inhibition
+                button is clicked; expected to repaint the figure.
         """
         self.fig = fig
         self.spec = spec
         self.channel_view = channel_view
         self.goal_trace = goal_trace
+        self.spread_trace = spread_trace
+        self.show_inhibition = show_inhibition
+        self._on_toggle_inhibition = on_toggle_inhibition
         self._ax = fig.add_subplot(spec)
         self._mode: str | None = "single"
         self._projection: str | None = None
         self._proj_axes: list[Axes] = []
         self._inset: FeatureInset | None = None
+        self._inhibition_button = self._build_inhibition_button()
+        self._spread_slider: Slider | None = None
+        self._slider_record: SpreadRecord | None = None
 
     def draw_placeholder(self, message: str) -> None:
         """Draw a centered placeholder message in the Monty panel.
@@ -225,6 +336,7 @@ class MontyPanel:
         Args:
             message: The text to display.
         """
+        self._hide_inhibition_controls()
         ax = self._ensure_projection(None)
         ax.cla()
         ax.set_axis_off()
@@ -249,6 +361,7 @@ class MontyPanel:
             channel: The selected input channel.
             pts: The channel's `(M, 3)` non-padded location points.
         """
+        self._hide_inhibition_controls()
         if isinstance(self.channel_view.resolve_sm_channel(channel), TwoDSensorModule):
             self._draw_selected_channel_2d(channel, pts)
             return
@@ -272,13 +385,21 @@ class MontyPanel:
         as a 3D point cloud. When the displayed LM's goal generator holds a current
         hypothesis-testing goal targeting the drawn graph, the goal's model-frame
         target location is marked as a green dot labeled with the LM id; the LM's
-        earlier goals on the same graph are drawn beneath it as faint green dots. On
-        the step a goal is proposed, the hypothesis it was compared against (the
-        second most likely object, or the MLH object's second most likely pose) is
-        superimposed in light blue, posed relative to the MLH.
+        earlier goals on the same graph are drawn beneath it as faint green dots.
+        Goals whose target was selected from a particular input channel's graph are
+        only drawn on that channel's graph. On the step a goal is proposed, the
+        hypothesis it was compared against (the second most likely object, or the MLH
+        object's second most likely pose) is superimposed in light blue, posed
+        relative to the MLH.
+
+        With inhibition shown, the drawn graph's inhibited nodes are colored by their
+        inhibition weight or, while a spread through the drawn graph is being
+        replayed, the nodes the spread reached so far are colored by the order in
+        which it reached them.
         """
         lm = self.channel_view.lm
         graph = None
+        channel = None
         mlh = lm._get_current_mlh()
         if mlh and mlh.get("graph_id") not in (None, "no_observations_yet"):
             graph_id = mlh["graph_id"]
@@ -287,39 +408,54 @@ class MontyPanel:
                 if channel is not None:
                     graph = lm.graph_memory.get_graph(graph_id, channel)
 
-        if graph is None or getattr(graph, "pos", None) is None:
+        if (
+            graph is None
+            or getattr(graph, "pos", None) is None
+            or len(np.asarray(graph.pos)) == 0
+        ):
             self.draw_placeholder("No MLH")
+            self._inhibition_button.ax.set_visible(self._inhibition_gsg() is not None)
             return
         pos = np.asarray(graph.pos)
-        if len(pos) == 0:
-            self.draw_placeholder("No MLH")
-            return
+
+        self._inhibition_button.ax.set_visible(self._inhibition_gsg() is not None)
+        record = self._spread_to_replay(mlh["graph_id"], channel)
+        self._sync_spread_slider(record)
+        highlights = _NodeHighlights(
+            replay=self._replayed_nodes(record),
+            replay_total=len(record.node_order) if record is not None else 0,
+            replay_label=self._replay_label(record),
+            weights=self._inhibition_weights(mlh["graph_id"], channel, graph),
+        )
 
         color = self._mlh_marker_color(mlh, lm.object_evidence_threshold)
         if is_3d(pos):
             ax = self._ensure_projection("3d")
-            self._show_mlh_3d(ax, mlh, pos, color)
+            self._show_mlh_3d(ax, mlh, channel, pos, color, highlights)
         else:
             ax = self._ensure_projection(None)
-            self._show_mlh_2d(ax, mlh, graph, pos, color)
+            self._show_mlh_2d(ax, mlh, channel, graph, pos, color, highlights)
 
     def _goal_in_model_frame(
-        self, graph_id: str
+        self, graph_id: str, channel: str
     ) -> tuple[npt.NDArray[np.float64], str] | None:
         """The displayed LM's current goal target on the drawn MLH graph.
 
         An LM's goal generator snapshots the model-frame target location (and the
-        graph it was proposed on) in the goal's `info` when the goal is created, so
-        the target can be marked directly on the stored graph. The marker is only
-        meaningful while the drawn MLH graph is the one the goal was proposed on.
+        graph and input channel it was selected from) in the goal's `info` when the
+        goal is created, so the target can be marked directly on the stored graph.
+        The marker is only meaningful while the drawn MLH graph is the one the goal
+        was proposed on, and its channel is the one the target was selected from
+        (when recorded).
 
         Args:
             graph_id: The id of the MLH graph being drawn.
+            channel: The input channel whose graph is being drawn.
 
         Returns:
             The `(location, sender_id)` of the goal target in the graph's model
             frame, or `None` when the LM has no goal generator, no current goal, or
-            the goal targets a different graph.
+            the goal targets a different graph or channel.
         """
         gsg = getattr(self.channel_view.lm, "gsg", None)
         goal = getattr(gsg, "output_goal", None)
@@ -328,21 +464,179 @@ class MontyPanel:
         location = goal.info.get("model_frame_target_loc")
         if location is None or goal.info.get("model_frame_graph_id") != graph_id:
             return None
+        if goal.info.get("model_frame_input_channel") not in (None, channel):
+            return None
         return np.asarray(location, dtype=float), str(goal.sender_id)
 
-    def _past_goals(self, graph_id: str) -> npt.NDArray[np.float64]:
+    def _past_goals(self, graph_id: str, channel: str) -> npt.NDArray[np.float64]:
         """The displayed LM's earlier goal targets on the drawn MLH graph.
 
         Args:
             graph_id: The id of the MLH graph being drawn.
+            channel: The input channel whose graph is being drawn.
 
         Returns:
-            The `(K, 3)` model-frame goal targets the displayed LM proposed on this
-            graph this episode, including the current goal (drawn over it).
+            The `(K, 3)` model-frame goal targets the displayed LM selected from this
+            channel's graph this episode, including the current goal (drawn over it).
         """
         return self.goal_trace.locations(
-            self.channel_view.lm.learning_module_id, graph_id
+            self.channel_view.lm.learning_module_id, graph_id, channel
         )
+
+    # ------------------------- Inhibition -------------------------
+
+    def _build_inhibition_button(self) -> Button:
+        """Add the (initially hidden) inhibition toggle to the MLH view's corner.
+
+        Returns:
+            The toggle button.
+        """
+        monty = self.spec.get_position(self.fig)
+        ax = self.fig.add_axes([monty.x0, monty.y0, 0.09, 0.03])
+        # Keep the button above the MLH axis, which is re-added whenever its
+        # projection changes.
+        ax.set_zorder(10)
+        button = Button(ax, self._inhibition_caption())
+        button.label.set_fontsize(8)
+        button.on_clicked(self._on_inhibition_clicked)
+        ax.set_visible(False)
+        return button
+
+    def _inhibition_caption(self) -> str:
+        return f"Inhibition: {'on' if self.show_inhibition else 'off'}"
+
+    def _on_inhibition_clicked(self, _event: object) -> None:
+        """Toggle showing inhibition weights.
+
+        Args:
+            _event: The matplotlib button event (unused).
+        """
+        self.show_inhibition = not self.show_inhibition
+        self._inhibition_button.label.set_text(self._inhibition_caption())
+        self._on_toggle_inhibition(self.show_inhibition)
+
+    def _hide_inhibition_controls(self) -> None:
+        self._inhibition_button.ax.set_visible(False)
+        self._sync_spread_slider(None)
+
+    def _inhibition_gsg(self) -> object | None:
+        """The displayed LM's goal generator, if it inhibits child objects.
+
+        Returns:
+            The goal generator, or `None` when it has no inhibition weights.
+        """
+        gsg = getattr(self.channel_view.lm, "gsg", None)
+        return gsg if hasattr(gsg, "get_inhibition_weights") else None
+
+    def _inhibition_weights(
+        self, graph_id: str, channel: str, graph: GraphObjectModel
+    ) -> npt.NDArray[np.float64] | None:
+        """The inhibition weight of each node of the drawn graph, when shown.
+
+        Args:
+            graph_id: The id of the MLH graph being drawn.
+            channel: The input channel whose graph is being drawn.
+            graph: The drawn graph.
+
+        Returns:
+            One weight in [0, 1] per node, or `None` when inhibition is not shown,
+            or the drawn graph does not store object IDs (and so is never
+            inhibited).
+        """
+        gsg = self._inhibition_gsg()
+        if not self.show_inhibition or gsg is None:
+            return None
+        if "object_id" not in (graph.feature_mapping or {}):
+            return None
+        return np.asarray(gsg.get_inhibition_weights(graph_id, channel), dtype=float)
+
+    def _spread_to_replay(self, graph_id: str, channel: str) -> SpreadRecord | None:
+        """The latest step's spread through the drawn graph, when inhibition is shown.
+
+        Args:
+            graph_id: The id of the MLH graph being drawn.
+            channel: The input channel whose graph is being drawn.
+
+        Returns:
+            The spread, or `None` when inhibition is not shown or the displayed LM
+            did not spread through the drawn graph on the latest step.
+        """
+        if not self.show_inhibition:
+            return None
+        return self.spread_trace.find(
+            self.channel_view.lm.learning_module_id, graph_id, channel
+        )
+
+    def _sync_spread_slider(self, record: SpreadRecord | None) -> None:
+        """Show the replay slider for a spread, or remove it when there is none.
+
+        The slider is only rebuilt when the spread changes, so its position is kept
+        while the same spread is redrawn (e.g. on a selector click).
+
+        Args:
+            record: The spread to replay, or `None` to remove the slider.
+        """
+        if record is self._slider_record:
+            return
+        if self._spread_slider is not None:
+            self._spread_slider.ax.remove()
+            self._spread_slider = None
+        self._slider_record = record
+        if record is None:
+            return
+        num_nodes = len(record.node_order)
+        monty = self.spec.get_position(self.fig)
+        width = monty.x1 - monty.x0
+        ax = self.fig.add_axes(
+            [
+                monty.x0 + 0.1 * width,
+                SPREAD_SLIDER_BOTTOM,
+                0.8 * width,
+                SPREAD_SLIDER_HEIGHT,
+            ]
+        )
+        self._spread_slider = Slider(
+            ax,
+            "Spread",
+            0,
+            num_nodes,
+            valinit=num_nodes,
+            valstep=1,
+            valfmt=f"%d / {num_nodes}",
+        )
+        self._spread_slider.on_changed(self._on_spread_slider_changed)
+
+    def _on_spread_slider_changed(self, _value: float) -> None:
+        """Redraw the MLH view at the new replay position.
+
+        Args:
+            _value: The slider value (read back from the slider when drawing).
+        """
+        self.draw_mlh()
+        self.fig.canvas.draw_idle()
+
+    def _replayed_nodes(
+        self, record: SpreadRecord | None
+    ) -> npt.NDArray[np.int_] | None:
+        """The nodes the replayed spread has reached at the slider's position.
+
+        Args:
+            record: The spread being replayed, or `None`.
+
+        Returns:
+            The reached nodes in the order they were reached, or `None` when no
+            spread is being replayed.
+        """
+        if record is None or self._spread_slider is None:
+            return None
+        return np.asarray(record.node_order[: int(self._spread_slider.val)], dtype=int)
+
+    def _replay_label(self, record: SpreadRecord | None) -> str | None:
+        if record is None:
+            return None
+        names = self.channel_view.object_id_names(record.input_channel)
+        name = names.get(int(record.object_id), f"object {int(record.object_id)}")
+        return f"spread of {name}"
 
     def _second_hypothesis_overlay(
         self, graph_id: str
@@ -505,8 +799,10 @@ class MontyPanel:
         self,
         ax: Axes,
         mlh: dict,
+        channel: str,
         pos: npt.NDArray[np.float64],
         mlh_color: str,
+        highlights: _NodeHighlights,
     ) -> None:
         """Render a 3D graph as a point cloud with the MLH location marked.
 
@@ -517,14 +813,17 @@ class MontyPanel:
         Args:
             ax: The 3D Monty axis.
             mlh: The current most likely hypothesis.
+            channel: The input channel whose graph is drawn.
             pos: The graph node positions, shape `(N, 3)`.
             mlh_color: The MLH location marker color.
+            highlights: The inhibited or spread-reached nodes to color.
         """
-        goal_marker = self._goal_in_model_frame(mlh["graph_id"])
-        past_goals = self._past_goals(mlh["graph_id"])
+        goal_marker = self._goal_in_model_frame(mlh["graph_id"], channel)
+        past_goals = self._past_goals(mlh["graph_id"], channel)
         overlay = self._second_hypothesis_overlay(mlh["graph_id"])
         ax.cla()
         ax.scatter(pos[:, 1], pos[:, 0], pos[:, 2], c="black", s=2)
+        highlighted = highlights.draw(ax, pos, three_d=True)
         if overlay is not None:
             second_pts, second_label = overlay
             ax.scatter(
@@ -566,7 +865,12 @@ class MontyPanel:
                 label=f"goal ({sender})",
                 depthshade=False,
             )
-        if goal_marker is not None or len(past_goals) or overlay is not None:
+        if (
+            goal_marker is not None
+            or len(past_goals)
+            or overlay is not None
+            or highlighted
+        ):
             ax.legend(fontsize=7, loc="upper right")
         ax.set_title(f"MLH ({mlh['graph_id']})")
         ax.set_axis_off()
@@ -576,11 +880,13 @@ class MontyPanel:
         self,
         ax: Axes,
         mlh: dict,
+        channel: str,
         graph: GraphObjectModel,
         pos: npt.NDArray[np.float64],
         mlh_color: str,
+        highlights: _NodeHighlights,
     ) -> None:
-        """Render a 2D SM graph as hsv-colored, edge-oriented segments.
+        """Render a planar graph as hsv-colored, edge-oriented segments.
 
         When the displayed LM holds a current goal targeting this graph, its
         model-frame target location is marked as a labeled green dot, over faint
@@ -589,12 +895,14 @@ class MontyPanel:
         Args:
             ax: The 2D Monty axis.
             mlh: The current most likely hypothesis.
+            channel: The input channel whose graph is drawn.
             graph: The MLH graph object model.
             pos: The graph node positions, shape `(N, >=2)`.
             mlh_color: The MLH location marker color.
+            highlights: The inhibited or spread-reached nodes to color.
         """
-        goal_marker = self._goal_in_model_frame(mlh["graph_id"])
-        past_goals = self._past_goals(mlh["graph_id"])
+        goal_marker = self._goal_in_model_frame(mlh["graph_id"], channel)
+        past_goals = self._past_goals(mlh["graph_id"], channel)
         overlay = self._second_hypothesis_overlay(mlh["graph_id"])
         ax.cla()
         x, y = pos[:, 0], pos[:, 1]
@@ -611,6 +919,7 @@ class MontyPanel:
             graph_feature.get("pose_vectors"),
         )
         draw_2d_segments(ax, x, y, colors, edge_mask, tangents)
+        highlighted = highlights.draw(ax, pos, three_d=False)
         if overlay is not None:
             second_pts, second_label = overlay
             ax.plot(
@@ -654,9 +963,14 @@ class MontyPanel:
                 color="green",
                 markersize=7,
                 label=f"goal ({sender})",
-                zorder=4,
+                zorder=6,
             )
-        if goal_marker is not None or len(past_goals) or overlay is not None:
+        if (
+            goal_marker is not None
+            or len(past_goals)
+            or overlay is not None
+            or highlighted
+        ):
             ax.legend(fontsize=7, loc="upper right")
         ax.set_title(f"MLH ({mlh['graph_id']})")
 

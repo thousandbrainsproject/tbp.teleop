@@ -37,6 +37,7 @@ if TYPE_CHECKING:
         Monty,
         SensorModule,
     )
+    from tbp.monty.frameworks.models.goal_generation import SpreadRecord
 
 try:  # matplotlib >= 3.9; `rcsetup.interactive_bk` was removed in 3.11
     from matplotlib.backends import BackendFilter, backend_registry
@@ -472,19 +473,27 @@ class EvidenceHistory:
 class GoalTrace:
     """Per-LM, per-graph trace of the model-frame goal targets proposed over an episode.
 
-    An LM's goal generator snapshots each goal's model-frame target location and the
-    graph it was proposed on in the goal's `info`. Each new goal is recorded once under
-    its proposing LM and graph, so the trace for a graph reappears whenever the MLH
-    switches back to it and never bleeds onto other graphs. Pure data: the Monty section
-    reads it to draw past goals on the MLH graph.
+    An LM's goal generator snapshots each goal's model-frame target location, the
+    graph it was proposed on and, when the target is a node of a stored graph, the
+    input channel of that graph in the goal's `info`. Each new goal is recorded once
+    under its proposing LM and graph, so the trace for a graph reappears whenever the
+    MLH switches back to it and never bleeds onto other graphs. Pure data: the Monty
+    section reads it to draw past goals on the MLH graph of the channel they came from.
     """
 
     def __init__(self) -> None:
         """Start with an empty trace."""
-        self.locations_by_lm: dict[str, dict[str, list[npt.NDArray[np.float64]]]] = {}
+        # Each recorded goal is its `(location, input channel)`; the channel is
+        # `None` when the goal generator did not record one.
+        self.locations_by_lm: dict[
+            str, dict[str, list[tuple[npt.NDArray[np.float64], str | None]]]
+        ] = {}
         # The `(top, second)` hypotheses each LM compared to propose a goal this step;
         # only LMs that proposed a new goal since the last `record` have an entry.
         self.comparison_by_lm: dict[str, tuple[dict, dict]] = {}
+        # The input channel of each new goal proposed since the last `record`, for the
+        # LMs whose goal generator recorded one.
+        self.new_goal_channel_by_lm: dict[str, str] = {}
         # Goals persist on the generator across steps until replaced, so the last seen
         # goal object per LM identifies when a new goal has been proposed.
         self._last_goal_by_lm: dict[str, object] = {}
@@ -493,6 +502,7 @@ class GoalTrace:
         """Drop all recorded goals so the trace restarts from empty."""
         self.locations_by_lm.clear()
         self.comparison_by_lm.clear()
+        self.new_goal_channel_by_lm.clear()
         self._last_goal_by_lm.clear()
 
     def record(self, learning_modules: list[LearningModule]) -> None:
@@ -505,6 +515,7 @@ class GoalTrace:
             learning_modules: All of the model's learning modules.
         """
         self.comparison_by_lm.clear()
+        self.new_goal_channel_by_lm.clear()
         for lm in learning_modules:
             goal = getattr(getattr(lm, "gsg", None), "output_goal", None)
             lm_id = lm.learning_module_id
@@ -515,9 +526,12 @@ class GoalTrace:
             graph_id = goal.info.get("model_frame_graph_id")
             if location is None or graph_id is None:
                 continue
+            channel = goal.info.get("model_frame_input_channel")
             self.locations_by_lm.setdefault(lm_id, {}).setdefault(graph_id, []).append(
-                np.asarray(location, dtype=float)
+                (np.asarray(location, dtype=float), channel)
             )
+            if channel is not None:
+                self.new_goal_channel_by_lm[lm_id] = channel
             comparison = self._compared_hypotheses(lm, graph_id)
             if comparison is not None:
                 self.comparison_by_lm[lm_id] = comparison
@@ -558,18 +572,80 @@ class GoalTrace:
             dict(second, location=np.array(second["location"], dtype=float)),
         )
 
-    def locations(self, lm_id: str, graph_id: str) -> npt.NDArray[np.float64]:
+    def locations(
+        self, lm_id: str, graph_id: str, channel: str | None = None
+    ) -> npt.NDArray[np.float64]:
         """The recorded goal targets an LM proposed on a graph, in its model frame.
 
         Args:
             lm_id: The proposing learning module's id.
             graph_id: The graph the goals were proposed on.
+            channel: When given, only the goals selected from this input channel's
+                graph (plus any goal without a recorded channel) are returned.
 
         Returns:
             The `(K, 3)` goal target locations in proposal order (`K` may be 0).
         """
-        locs = self.locations_by_lm.get(lm_id, {}).get(graph_id, [])
+        goals = self.locations_by_lm.get(lm_id, {}).get(graph_id, [])
+        locs = [
+            location
+            for location, goal_channel in goals
+            if channel is None or goal_channel in (None, channel)
+        ]
         return np.array(locs, dtype=float).reshape(-1, 3)
+
+
+class SpreadTrace:
+    """The inhibition spreads each LM's goal generator performed on the latest step.
+
+    A `ChildObjectsGoalGenerator` replaces its `spread_records` list on every step it
+    runs, so a list not seen before holds that step's spreads. On steps where the
+    generator does not run (e.g. location-only steps), the list is unchanged and no
+    spreads are reported. Pure data: the Monty section reads it to replay a spread.
+    """
+
+    def __init__(self) -> None:
+        """Start with no spreads."""
+        self.records_by_lm: dict[str, list[SpreadRecord]] = {}
+        self._last_records_by_lm: dict[str, object] = {}
+
+    def clear(self) -> None:
+        """Drop all spreads, e.g. at an episode boundary."""
+        self.records_by_lm.clear()
+        self._last_records_by_lm.clear()
+
+    def record(self, learning_modules: list[LearningModule]) -> None:
+        """Keep the spreads each LM's goal generator performed since the last call.
+
+        Args:
+            learning_modules: All of the model's learning modules.
+        """
+        self.records_by_lm.clear()
+        for lm in learning_modules:
+            records = getattr(getattr(lm, "gsg", None), "spread_records", None)
+            lm_id = lm.learning_module_id
+            if records is None or records is self._last_records_by_lm.get(lm_id):
+                continue
+            self._last_records_by_lm[lm_id] = records
+            if records:
+                self.records_by_lm[lm_id] = list(records)
+
+    def find(self, lm_id: str, graph_id: str, channel: str) -> SpreadRecord | None:
+        """The latest step's spread by an LM through one channel's graph.
+
+        Args:
+            lm_id: The learning module whose goal generator spread.
+            graph_id: The graph the spread went through.
+            channel: The input channel whose graph the spread went through.
+
+        Returns:
+            The spread, or `None` when the LM did not spread through that graph on
+            the latest step.
+        """
+        for record in self.records_by_lm.get(lm_id, []):
+            if record.graph_id == graph_id and record.input_channel == channel:
+                return record
+        return None
 
 
 class ChannelView:
@@ -624,6 +700,38 @@ class ChannelView:
             index = 0
         self.channel = channels[index]
         return True
+
+    def select_channel(self, channel: str) -> None:
+        """Select an input channel of the displayed LM's graphs.
+
+        Unlike cycling, the channel need not have been seen in the buffer yet: a goal
+        generator may target a child object on a learning-module channel before the
+        source LM has passed anything this episode.
+
+        Args:
+            channel: The channel to select.
+        """
+        self.channel = channel
+
+    def channel_sender_type(self, channel: str | None) -> str | None:
+        """Whether a channel is fed by a sensor module or a learning module.
+
+        Args:
+            channel: The channel id.
+
+        Returns:
+            The buffer's `"SM"` / `"LM"` sender type for the channel, else `"LM"` when
+            the channel is the id of one of the model's learning modules (i.e. it has
+            not passed anything this episode), else `None`.
+        """
+        if channel is None:
+            return None
+        sender_type = self.lm.buffer.channel_sender_types.get(channel)
+        if sender_type is None and any(
+            lm.learning_module_id == channel for lm in self.model.learning_modules
+        ):
+            return "LM"
+        return sender_type
 
     def ensure_channel(self) -> bool:
         """Default the selected channel on first use once the buffer has channels.
@@ -698,9 +806,7 @@ class ChannelView:
             The matching learning module, or `None` when the channel is not a
             learning-module channel or no module carries that id.
         """
-        if channel is None:
-            return None
-        if self.lm.buffer.channel_sender_types.get(channel) != "LM":
+        if self.channel_sender_type(channel) != "LM":
             return None
         return next(
             (m for m in self.model.learning_modules if m.learning_module_id == channel),
@@ -991,11 +1097,7 @@ class FeatureInset:
             channel: The channel whose live feature is drawn.
             rect: The `[left, bottom, width, height]` inset rectangle.
         """
-        sender_type = (
-            self.channel_view.lm.buffer.channel_sender_types.get(channel)
-            if channel is not None
-            else None
-        )
+        sender_type = self.channel_view.channel_sender_type(channel)
         if sender_type == "SM":
             sm = self.channel_view.resolve_sm_channel(channel)
             self._draw_from_sm(rect, sm)
