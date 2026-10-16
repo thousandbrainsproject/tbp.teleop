@@ -604,21 +604,28 @@ class PropagationTrace:
     """The salience propagations each LM's goal generator performed on the latest step.
 
     An `EvidenceGoalGenerator` replaces its `propagation_records` list on every step
-    it runs, so a list not seen before holds that step's propagations (each reducing
-    the salience of the nodes it reached). On steps where the generator does not run
-    (e.g. location-only steps), the list is unchanged and no propagations are
-    reported. Pure data: the Monty section reads it to replay a propagation.
+    it runs, so a list not seen before holds that step's propagations of sensed
+    input (each reducing the salience of the nodes it reached). On a step it
+    generates a Goal, its `goal_propagation_record` holds the hypothetical
+    propagation from the Goal's target, which raised the salience of the nodes it
+    reached to the maximum. On steps where the generator does not run (e.g.
+    location-only steps), neither changes and no propagations are reported. Pure
+    data: the Monty section reads it to show and replay a step's propagations.
     """
 
     def __init__(self) -> None:
         """Start with no propagations."""
         self.records_by_lm: dict[str, list[PropagationRecord]] = {}
+        self.goal_record_by_lm: dict[str, PropagationRecord] = {}
         self._last_records_by_lm: dict[str, object] = {}
+        self._last_goal_record_by_lm: dict[str, object] = {}
 
     def clear(self) -> None:
         """Drop all propagations, e.g. at an episode boundary."""
         self.records_by_lm.clear()
+        self.goal_record_by_lm.clear()
         self._last_records_by_lm.clear()
+        self._last_goal_record_by_lm.clear()
 
     def record(self, learning_modules: list[LearningModule]) -> None:
         """Keep the propagations each LM's goal generator performed since the last call.
@@ -627,14 +634,23 @@ class PropagationTrace:
             learning_modules: All of the model's learning modules.
         """
         self.records_by_lm.clear()
+        self.goal_record_by_lm.clear()
         for lm in learning_modules:
-            records = getattr(getattr(lm, "gsg", None), "propagation_records", None)
+            gsg = getattr(lm, "gsg", None)
             lm_id = lm.learning_module_id
-            if records is None or records is self._last_records_by_lm.get(lm_id):
-                continue
-            self._last_records_by_lm[lm_id] = records
-            if records:
-                self.records_by_lm[lm_id] = list(records)
+            records = getattr(gsg, "propagation_records", None)
+            if records is not None and records is not self._last_records_by_lm.get(
+                lm_id
+            ):
+                self._last_records_by_lm[lm_id] = records
+                if records:
+                    self.records_by_lm[lm_id] = list(records)
+            goal_record = getattr(gsg, "goal_propagation_record", None)
+            if goal_record is not None and (
+                goal_record is not self._last_goal_record_by_lm.get(lm_id)
+            ):
+                self._last_goal_record_by_lm[lm_id] = goal_record
+                self.goal_record_by_lm[lm_id] = goal_record
 
     def object_id_records(self, lm_id: str) -> list[PropagationRecord]:
         """The latest step's propagations of received object IDs by an LM.
@@ -660,13 +676,35 @@ class PropagationTrace:
             channel: The input channel whose graph the propagation went through.
 
         Returns:
-            The propagation, or `None` when the LM did not propagate through that
-            graph on the latest step.
+            The propagation of sensed input, or `None` when the LM did not
+            propagate sensed input through that graph on the latest step.
         """
         for record in self.records_by_lm.get(lm_id, []):
             if record.graph_id == graph_id and record.input_channel == channel:
                 return record
         return None
+
+    def find_goal(
+        self, lm_id: str, graph_id: str, channel: str
+    ) -> PropagationRecord | None:
+        """The latest step's propagation from a new Goal's target through a graph.
+
+        Args:
+            lm_id: The learning module whose goal generator generated the Goal.
+            graph_id: The graph the propagation went through.
+            channel: The input channel whose graph the propagation went through.
+
+        Returns:
+            The propagation, or `None` when the LM generated no Goal on the latest
+            step, or its target was not on that graph.
+        """
+        record = self.goal_record_by_lm.get(lm_id)
+        if record is None or (record.graph_id, record.input_channel) != (
+            graph_id,
+            channel,
+        ):
+            return None
+        return record
 
 
 class ReturnInhibitionRecorder:

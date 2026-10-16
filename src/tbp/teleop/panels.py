@@ -15,10 +15,12 @@ from typing import TYPE_CHECKING, Callable, ClassVar
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
+from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.gridspec import GridSpecFromSubplotSpec
 from matplotlib.ticker import MaxNLocator
 from matplotlib.widgets import Button, Slider
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from tbp.monty.frameworks.models.model_salience import RESTING_SALIENCE
 from tbp.monty.frameworks.models.two_d_sensor_module import TwoDSensorModule
 from tbp.monty.frameworks.sensors import SensorID
 from tbp.monty.frameworks.utils.plot_utils import add_patch_outline_to_view_finder
@@ -34,6 +36,7 @@ from tbp.teleop.helpers import (
     corner_rect,
     draw_2d_segments,
     draw_buffer_series,
+    frame_center_half,
     is_3d,
     planar_style,
 )
@@ -59,25 +62,51 @@ if TYPE_CHECKING:
 # bottom edge, below the interactive buttons and the speed slider.
 PROPAGATION_SLIDER_BOTTOM, PROPAGATION_SLIDER_HEIGHT = 0.012, 0.022
 
+# The model-based salience views the MLH view's salience button cycles through,
+# with their button captions: none, the current salience of every node, and the
+# changes the latest step made to it.
+SALIENCE_VIEW_CAPTIONS = {"off": "off", "current": "current", "step": "this step"}
+# Colors the current salience grey (0, explained) to orange (rest) to red (1,
+# highlighted by a goal), as in the `EvidenceGoalGenerator`'s propagation explorer.
+SALIENCE_CMAP = LinearSegmentedColormap.from_list(
+    "model_salience", ["#e6e6e6", "#fdae6b", "#d94801"]
+)
+# Colors the nodes a propagation of sensed input reduced, dark red for the first
+# reached (the largest reduction) to yellow for the last.
+REDUCTION_CMAP = "YlOrRd"
+# The nodes a new goal raised to the maximum salience.
+GOAL_EXCITATION_COLOR = "#1b7837"
+
 
 @dataclass(frozen=True)
 class _NodeHighlights:
     """Nodes of the drawn MLH graph to color over its point cloud.
 
     Attributes:
-        replay: The propagation being replayed, or `None` when none is.
+        view: The salience view, a key of `SALIENCE_VIEW_CAPTIONS`.
+        salience: The model-based salience of every node, drawn in the "current"
+            view, else `None`.
+        resting_salience: The salience every node relaxes back to.
+        reduction: The latest step's propagation of sensed input through the drawn
+            graph, drawn in the "step" view, else `None`.
+        excitation: The latest step's propagation from a new goal's target through
+            the drawn graph, drawn in the "step" view, else `None`.
+        replay: Whichever of `reduction` and `excitation` the slider replays, or
+            `None` when none is replayed.
         progress: The number of nodes the replayed propagation has reached so far.
-        replay_label: The legend label of the replayed propagation.
-        salience: The model-based salience of every node, or `None` when not shown.
-            Only drawn when no propagation is being replayed.
+        labels: The legend label of each propagation, keyed by its `id`.
     """
 
+    view: str
+    salience: npt.NDArray[np.float64] | None
+    resting_salience: float
+    reduction: PropagationRecord | None
+    excitation: PropagationRecord | None
     replay: PropagationRecord | None
     progress: int
-    replay_label: str | None
-    salience: npt.NDArray[np.float64] | None
+    labels: dict[int, str]
 
-    def draw(self, ax: Axes, pos: npt.NDArray[np.float64], *, three_d: bool) -> bool:
+    def draw(self, ax: Axes, pos: npt.NDArray[np.float64], *, three_d: bool) -> None:
         """Color the highlighted nodes on the MLH axis.
 
         Args:
@@ -86,8 +115,6 @@ class _NodeHighlights:
             three_d: Whether `ax` is the 3D view, which plots `(y, x, z)`, rather
                 than the 2D view, which plots `(x, y)`.
 
-        Returns:
-            Whether anything with a legend label was drawn.
         """
 
         def coords(points: npt.NDArray[np.float64]) -> tuple:
@@ -96,99 +123,107 @@ class _NodeHighlights:
                 return points[:, 1], points[:, 0], points[:, 2]
             return points[:, 0], points[:, 1]
 
-        extra = {"depthshade": False} if three_d else {}
-        if self.replay is not None:
-            return self._draw_replay(ax, pos, coords, extra)
-        if self.salience is None:
-            return False
-        reduced = np.nonzero(self.salience < 1.0)[0]
-        if len(reduced) == 0:
-            return False
-        ax.scatter(
-            *coords(pos[reduced]),
-            c=1.0 - self.salience[reduced],
-            cmap="Reds",
-            # Start the colormap below 0 so nearly recovered nodes stay visible.
-            vmin=-0.5,
-            vmax=1.0,
-            s=10,
-            label=(
-                f"salience reduced ({len(reduced)}, "
-                f"min {self.salience[reduced].min():.2f})"
-            ),
-            zorder=4,
-            **extra,
-        )
-        return True
+        extra = {"depthshade": False, "axlim_clip": True} if three_d else {}
+        if self.view == "current":
+            self._draw_salience(ax, pos, coords, extra)
+        elif self.view == "step":
+            self._draw_step(ax, pos, coords, extra)
 
-    def _draw_replay(
+    def _draw_salience(
         self,
         ax: Axes,
         pos: npt.NDArray[np.float64],
         coords: Callable[[npt.NDArray[np.float64]], tuple],
         extra: dict,
-    ) -> bool:
-        """Color the nodes the replayed propagation has reached so far.
+    ) -> None:
+        """Color every node by its salience, in place of the graph's own drawing.
 
-        Nodes reached from the seeds are colored dark to light (viridis) by their
-        number of hops from the seeds, and nodes reached by a push-through yellow
-        to red by their number of hops from where it began, as in the
-        `EvidenceGoalGenerator`'s propagation explorer. The node reached last is
-        ringed.
+        The salience colorbar, rather than the legend, explains the colors.
 
         Args:
             ax: The MLH axis.
             pos: The graph node positions, shape `(N, 3)`.
             coords: Maps node positions to the axis's plot coordinates.
             extra: Additional scatter keyword arguments for the axis.
-
-        Returns:
-            Whether anything with a legend label was drawn.
         """
-        record = self.replay
-        if self.progress == 0:
-            return False
-        total = len(record.node_order)
-        nodes = np.asarray(record.node_order[: self.progress], dtype=int)
-        stage = np.asarray(record.stage[: self.progress])
-        colors = np.empty((total, 4))
-        for value in np.unique(record.stage):
-            in_stage = record.stage == value
-            hops = record.hops[in_stage]
-            fraction = hops / max(hops.max(), 1)
-            if value == 0:
-                colors[in_stage] = plt.get_cmap("viridis")(fraction)
-            else:
-                colors[in_stage] = plt.get_cmap("YlOrRd")(0.35 + 0.65 * fraction)
-        colors = colors[: self.progress]
-        from_seeds = stage == 0
+        if self.salience is None:
+            return
         ax.scatter(
-            *coords(pos[nodes[from_seeds]]),
-            c=colors[from_seeds],
-            s=12,
-            label=f"{self.replay_label} ({self.progress}/{total})",
+            *coords(pos),
+            c=self.salience,
+            cmap=SALIENCE_CMAP,
+            vmin=0.0,
+            vmax=1.0,
+            s=8,
             zorder=4,
             **extra,
         )
-        if not from_seeds.all():
+
+    @property
+    def replaces_graph(self) -> bool:
+        """Whether the highlights color every node, so the graph is not drawn."""
+        return self.view == "current" and self.salience is not None
+
+    def _draw_step(
+        self,
+        ax: Axes,
+        pos: npt.NDArray[np.float64],
+        coords: Callable[[npt.NDArray[np.float64]], tuple],
+        extra: dict,
+    ) -> None:
+        """Color the nodes the latest step's propagations changed the salience of.
+
+        Nodes reduced by sensed input are colored dark red (the first reached, the
+        largest reduction) to yellow (the last), and nodes raised by a new goal
+        green; the goal's excitation follows the reduction within a step, so it is
+        drawn over it. Of the replayed propagation, only the nodes reached by the
+        slider's position are drawn, and the last of them is ringed. A propagation
+        that was pushed through says so in its legend label. The relaxation of
+        every other node towards rest is too small to draw.
+
+        Args:
+            ax: The MLH axis.
+            pos: The graph node positions, shape `(N, 3)`.
+            coords: Maps node positions to the axis's plot coordinates.
+            extra: Additional scatter keyword arguments for the axis.
+        """
+        for record in (self.reduction, self.excitation):
+            if record is None:
+                continue
+            total = len(record.node_order)
+            count = self.progress if record is self.replay else total
+            if count == 0:
+                continue
+            nodes = np.asarray(record.node_order[:count], dtype=int)
+            if record.hypothetical:
+                color = {"color": GOAL_EXCITATION_COLOR}
+            else:
+                fraction = np.arange(count) / max(total - 1, 1)
+                color = {"c": plt.get_cmap(REDUCTION_CMAP)(1.0 - 0.7 * fraction)}
+            label = f"{self.labels[id(record)]} ({count}/{total})"
+            pushes = int(np.max(record.stage[:count]))
+            if pushes:
+                label += f", {pushes}x push-through"
             ax.scatter(
-                *coords(pos[nodes[~from_seeds]]),
-                c=colors[~from_seeds],
+                *coords(pos[nodes]),
                 s=12,
-                label=f"pushed through ({np.count_nonzero(~from_seeds)})",
-                zorder=4,
+                label=label,
+                zorder=5 if record.hypothetical else 4,
+                **color,
                 **extra,
             )
-        ax.scatter(
-            *coords(pos[nodes[-1]]),
-            facecolors="none",
-            edgecolors="magenta",
-            s=90,
-            linewidths=1.5,
-            zorder=5,
-            **extra,
-        )
-        return True
+        replay = self.replay
+        if replay is not None and 0 < self.progress < len(replay.node_order):
+            ax.scatter(
+                *coords(pos[replay.node_order[self.progress - 1]]),
+                facecolors="none",
+                edgecolors="magenta",
+                s=90,
+                linewidths=1.5,
+                label="reached at slider position",
+                zorder=6,
+                **extra,
+            )
 
 
 class SimulatorPanel:
@@ -338,14 +373,27 @@ class MontyPanel:
     latest step (with the object ID, for a learning-module channel).
 
     When the displayed LM's goal generator keeps a model-based salience for the
-    nodes of its object models (an `EvidenceGoalGenerator`), a "Model salience"
-    button in the corner of the MLH view toggles coloring the drawn graph's nodes
-    whose salience has been reduced (i.e. explained by earlier input), the more
-    strongly the lower their salience. While it is on, and the LM propagated a
-    salience reduction through the drawn graph on the latest step, a temporary slider
-    along the bottom of the figure replays that propagation, from the first node it
-    reached to the last.
+    nodes of its object models (an `EvidenceGoalGenerator`), a "Salience" button in
+    the corner of the MLH view cycles through three views of the drawn graph:
+    - off: no salience shown.
+    - current: the salience every node has accumulated over the episode, colored
+      grey (0, explained by input) to orange (rest) to red (1, highlighted by a
+      goal) in place of the graph's own drawing, with a colorbar above the button.
+    - this step: the changes the latest step made, i.e. the nodes whose salience a
+      propagation of sensed input reduced (dark red to yellow, in the order it
+      reached them), and the nodes a new goal raised to the maximum (green). A
+      temporary slider along the bottom of the figure replays the reduction (or,
+      without one, the goal's excitation) node by node, ringing the node reached
+      at the slider's position.
+
+    The mouse wheel zooms the MLH view in and out around the center of the graph;
+    the zoom level persists across steps.
     """
+
+    # Mouse-wheel zoom of the MLH view: the per-notch scale factor and the allowed
+    # zoom range.
+    MLH_ZOOM_STEP: ClassVar[float] = 1.2
+    MLH_ZOOM_RANGE: ClassVar[tuple[float, float]] = (0.5, 25.0)
 
     def __init__(
         self,
@@ -355,13 +403,14 @@ class MontyPanel:
         goal_trace: GoalTrace,
         propagation_trace: PropagationTrace,
         *,
-        show_salience: bool,
-        on_toggle_salience: Callable[[bool], None],
+        salience_view: str,
+        on_change_salience_view: Callable[[str], None],
     ) -> None:
         """Bind the Monty column to its figure region and selection.
 
         Lays out the initial single 2D axis, matching the layout the placeholder and
-        inference 2D views start from, and the (initially hidden) salience button.
+        inference 2D views start from, and the (initially hidden) salience button
+        and colorbar.
 
         Args:
             fig: The figure to draw on.
@@ -369,25 +418,32 @@ class MontyPanel:
             channel_view: The selected LM/channel and per-channel feature accessors.
             goal_trace: The per-LM, per-graph trace of past model-frame goal targets.
             propagation_trace: The salience propagations of the latest step.
-            show_salience: Whether model-based salience starts out shown.
-            on_toggle_salience: Called with the new state when the salience button
-                is clicked; expected to repaint the figure.
+            salience_view: The salience view to start with, a key of
+                `SALIENCE_VIEW_CAPTIONS`.
+            on_change_salience_view: Called with the new view when the salience
+                button is clicked; expected to repaint the figure.
         """
         self.fig = fig
         self.spec = spec
         self.channel_view = channel_view
         self.goal_trace = goal_trace
         self.propagation_trace = propagation_trace
-        self.show_salience = show_salience
-        self._on_toggle_salience = on_toggle_salience
+        self.salience_view = salience_view
+        self._on_change_salience_view = on_change_salience_view
         self._ax = fig.add_subplot(spec)
         self._mode: str | None = "single"
         self._projection: str | None = None
         self._proj_axes: list[Axes] = []
         self._inset: FeatureInset | None = None
         self._salience_button = self._build_salience_button()
+        self._salience_colorbar_ax = self._build_salience_colorbar()
         self._propagation_slider: Slider | None = None
         self._slider_record: PropagationRecord | None = None
+        self._mlh_zoom = 1.0
+        # The center and half side length of the drawn MLH graph's unzoomed frame,
+        # or None when no MLH graph is drawn.
+        self._mlh_frame: tuple[npt.NDArray[np.float64], float] | None = None
+        fig.canvas.mpl_connect("scroll_event", self._on_scroll)
         monty = spec.get_position(fig)
         self._status_badge = fig.text(
             monty.x1,
@@ -439,6 +495,7 @@ class MontyPanel:
             message: The text to display.
         """
         self._hide_salience_controls()
+        self._mlh_frame = None
         ax = self._ensure_projection(None)
         ax.cla()
         ax.set_axis_off()
@@ -464,6 +521,7 @@ class MontyPanel:
             pts: The channel's `(M, 3)` non-padded location points.
         """
         self._hide_salience_controls()
+        self._mlh_frame = None
         if isinstance(self.channel_view.resolve_sm_channel(channel), TwoDSensorModule):
             self._draw_selected_channel_2d(channel, pts)
             return
@@ -494,10 +552,9 @@ class MontyPanel:
         object's second most likely pose) is superimposed in light blue, posed
         relative to the MLH.
 
-        With model-based salience shown, the drawn graph's nodes with reduced
-        salience are colored by how far it is reduced or, while a propagation
-        through the drawn graph is being replayed, the nodes the propagation reached
-        so far are colored by how far from its start it reached them.
+        The drawn graph's nodes are colored by their model-based salience, or the
+        changes the latest step made to it, per the salience view (see the class
+        docstring).
         """
         lm = self.channel_view.lm
         graph = None
@@ -525,17 +582,18 @@ class MontyPanel:
             return
         pos = np.asarray(graph.pos)
 
-        self._salience_button.ax.set_visible(self._salience_gsg() is not None)
-        record = self._propagation_to_replay(mlh["graph_id"], channel)
-        self._sync_propagation_slider(record)
-        highlights = _NodeHighlights(
-            replay=record,
-            progress=self._replay_progress(record),
-            replay_label=self._replay_label(record),
-            salience=self._node_salience(mlh["graph_id"], channel, len(pos)),
+        gsg = self._salience_gsg()
+        self._salience_button.ax.set_visible(gsg is not None)
+        self._salience_colorbar_ax.set_visible(
+            gsg is not None and self.salience_view == "current"
         )
+        highlights = self._node_highlights(mlh["graph_id"], channel, len(pos))
 
-        color = self._mlh_marker_color(mlh, lm.object_evidence_threshold)
+        # Over the salience colors, a black MLH marker stands out more than red.
+        if gsg is not None and self.salience_view != "off":
+            color = "black"
+        else:
+            color = self._mlh_marker_color(mlh, lm.object_evidence_threshold)
         if is_3d(pos):
             ax = self._ensure_projection("3d")
             self._show_mlh_3d(ax, mlh, channel, pos, color, highlights)
@@ -593,10 +651,10 @@ class MontyPanel:
     # ---------------------- Model-based salience ----------------------
 
     def _build_salience_button(self) -> Button:
-        """Add the (initially hidden) salience toggle to the MLH view's corner.
+        """Add the (initially hidden) salience view button to the MLH view's corner.
 
         Returns:
-            The toggle button.
+            The button.
         """
         monty = self.spec.get_position(self.fig)
         ax = self.fig.add_axes([monty.x0, monty.y0, 0.11, 0.03])
@@ -609,22 +667,85 @@ class MontyPanel:
         ax.set_visible(False)
         return button
 
+    def _build_salience_colorbar(self) -> Axes:
+        """Add the (initially hidden) colorbar of the current salience view.
+
+        It sits just above the salience button, with its ticks marking the
+        resting salience between the extremes.
+
+        Returns:
+            The colorbar's axis.
+        """
+        monty = self.spec.get_position(self.fig)
+        ax = self.fig.add_axes([monty.x0, monty.y0 + 0.055, 0.11, 0.008])
+        ax.set_zorder(10)
+        colorbar = self.fig.colorbar(
+            plt.cm.ScalarMappable(norm=plt.Normalize(0.0, 1.0), cmap=SALIENCE_CMAP),
+            cax=ax,
+            orientation="horizontal",
+        )
+        colorbar.set_ticks([0.0, RESTING_SALIENCE, 1.0])
+        colorbar.set_ticklabels(["0", "rest", "1"])
+        ax.tick_params(labelsize=6, length=2, pad=1)
+        ax.set_title("model salience", fontsize=7, pad=2)
+        ax.set_visible(False)
+        return ax
+
     def _salience_caption(self) -> str:
-        return f"Model salience: {'on' if self.show_salience else 'off'}"
+        return f"Salience: {SALIENCE_VIEW_CAPTIONS[self.salience_view]}"
 
     def _on_salience_clicked(self, _event: object) -> None:
-        """Toggle showing model-based salience.
+        """Advance to the next salience view.
 
         Args:
             _event: The matplotlib button event (unused).
         """
-        self.show_salience = not self.show_salience
+        views = list(SALIENCE_VIEW_CAPTIONS)
+        self.salience_view = views[(views.index(self.salience_view) + 1) % len(views)]
         self._salience_button.label.set_text(self._salience_caption())
-        self._on_toggle_salience(self.show_salience)
+        self._on_change_salience_view(self.salience_view)
 
     def _hide_salience_controls(self) -> None:
         self._salience_button.ax.set_visible(False)
+        self._salience_colorbar_ax.set_visible(False)
         self._sync_propagation_slider(None)
+
+    def _node_highlights(
+        self, graph_id: str, channel: str, num_nodes: int
+    ) -> _NodeHighlights:
+        """Resolve what the salience view colors on the drawn graph.
+
+        Also shows the replay slider for the propagation to replay, or removes it.
+
+        Args:
+            graph_id: The id of the MLH graph being drawn.
+            channel: The input channel whose graph is being drawn.
+            num_nodes: The number of nodes of the drawn graph.
+
+        Returns:
+            The nodes to color.
+        """
+        reduction = excitation = None
+        if self.salience_view == "step" and self._salience_gsg() is not None:
+            lm_id = self.channel_view.lm.learning_module_id
+            reduction = self.propagation_trace.find(lm_id, graph_id, channel)
+            excitation = self.propagation_trace.find_goal(lm_id, graph_id, channel)
+        replay = reduction if reduction is not None else excitation
+        self._sync_propagation_slider(replay)
+        return _NodeHighlights(
+            view=self.salience_view,
+            salience=self._node_salience(graph_id, channel, num_nodes),
+            resting_salience=RESTING_SALIENCE,
+            reduction=reduction,
+            excitation=excitation,
+            replay=replay,
+            progress=self._replay_progress(replay),
+            labels={
+                id(record): self._propagation_label(record)
+                for record in (reduction, excitation)
+                if record is not None
+            },
+        )
 
     def _salience_gsg(self) -> object | None:
         """The displayed LM's goal generator, if it keeps model-based salience.
@@ -643,8 +764,8 @@ class MontyPanel:
         """The model-based salience of each node of the drawn graph, when shown.
 
         Only graphs whose salience the goal generator tracks are read, as reading
-        any other would start tracking it; an untracked graph's salience is 1 at
-        every node.
+        any other would start tracking it; an untracked graph's salience is at rest
+        at every node.
 
         Args:
             graph_id: The id of the MLH graph being drawn.
@@ -652,33 +773,14 @@ class MontyPanel:
             num_nodes: The number of nodes of the drawn graph.
 
         Returns:
-            One salience in [0, 1] per node, or `None` when salience is not shown.
+            One salience in [0, 1] per node, or `None` outside the current view.
         """
         gsg = self._salience_gsg()
-        if not self.show_salience or gsg is None:
+        if self.salience_view != "current" or gsg is None:
             return None
         if (graph_id, channel) not in gsg.model_salience.tracked():
-            return np.ones(num_nodes)
+            return np.full(num_nodes, RESTING_SALIENCE)
         return np.array(gsg.get_salience(graph_id, channel), dtype=float)
-
-    def _propagation_to_replay(
-        self, graph_id: str, channel: str
-    ) -> PropagationRecord | None:
-        """The latest step's propagation through the drawn graph, when shown.
-
-        Args:
-            graph_id: The id of the MLH graph being drawn.
-            channel: The input channel whose graph is being drawn.
-
-        Returns:
-            The propagation, or `None` when salience is not shown or the displayed
-            LM did not propagate through the drawn graph on the latest step.
-        """
-        if not self.show_salience:
-            return None
-        return self.propagation_trace.find(
-            self.channel_view.lm.learning_module_id, graph_id, channel
-        )
 
     def _sync_propagation_slider(self, record: PropagationRecord | None) -> None:
         """Show the replay slider for a propagation, or remove it when there is none.
@@ -741,14 +843,61 @@ class MontyPanel:
             return 0
         return int(self._propagation_slider.val)
 
-    def _replay_label(self, record: PropagationRecord | None) -> str | None:
-        if record is None:
-            return None
+    def _propagation_label(self, record: PropagationRecord) -> str:
         if record.object_id is None:
-            return "propagation of similar features"
-        names = self.channel_view.object_id_names(record.input_channel)
-        name = names.get(int(record.object_id), f"object {int(record.object_id)}")
-        return f"propagation of {name}"
+            what = "similar features"
+        else:
+            names = self.channel_view.object_id_names(record.input_channel)
+            what = names.get(int(record.object_id), f"object {int(record.object_id)}")
+        if record.hypothetical:
+            return f"raised by goal: {what}"
+        return f"reduced: {what}"
+
+    # ---------------------------- Zoom ----------------------------
+
+    def _on_scroll(self, event: MouseEvent) -> None:
+        """Zoom the MLH view in or out on mouse wheel, around the graph's center.
+
+        Only reacts while the pointer is over a drawn MLH graph. The zoom level
+        persists across steps (each draw re-applies it).
+
+        Args:
+            event: The matplotlib scroll event; its `step` is positive to zoom in.
+        """
+        if self._mlh_frame is None or event.inaxes is not self._ax:
+            return
+        low, high = self.MLH_ZOOM_RANGE
+        self._mlh_zoom = float(
+            np.clip(self._mlh_zoom * self.MLH_ZOOM_STEP**event.step, low, high)
+        )
+        self._apply_mlh_zoom()
+        self.fig.canvas.draw_idle()
+
+    def _frame_mlh(self, ax: Axes) -> None:
+        """Square the drawn MLH graph's frame around its limits, then zoom it.
+
+        Args:
+            ax: The MLH axis, with its limits enclosing the drawn graph.
+        """
+        limits = [ax.get_xlim(), ax.get_ylim()]
+        if self._projection == "3d":
+            limits.append(ax.get_zlim())
+        limits = np.asarray(limits, dtype=float)
+        center = limits.mean(axis=1)
+        half = max(float((limits[:, 1] - limits[:, 0]).max()) / 2, 1e-3)
+        self._mlh_frame = (center, half)
+        self._apply_mlh_zoom()
+
+    def _apply_mlh_zoom(self) -> None:
+        """Apply the MLH graph's frame to its axis at the current zoom level."""
+        center, half = self._mlh_frame
+        half /= self._mlh_zoom
+        ax = self._ax
+        ax.set_xlim(center[0] - half, center[0] + half)
+        ax.set_ylim(center[1] - half, center[1] + half)
+        if len(center) == 3:
+            ax.set_zlim(center[2] - half, center[2] + half)
+            ax.set_box_aspect((1, 1, 1))
 
     def _second_hypothesis_overlay(
         self, graph_id: str
@@ -936,8 +1085,11 @@ class MontyPanel:
         past_goals = self._past_goals(mlh["graph_id"], channel)
         overlay = self._second_hypothesis_overlay(mlh["graph_id"])
         ax.cla()
-        ax.scatter(pos[:, 1], pos[:, 0], pos[:, 2], c="black", s=2)
-        highlighted = highlights.draw(ax, pos, three_d=True)
+        # Points outside the (zoomed) limits are hidden rather than drawn over the
+        # rest of the figure.
+        if not highlights.replaces_graph:
+            ax.scatter(pos[:, 1], pos[:, 0], pos[:, 2], c="black", s=2, axlim_clip=True)
+        highlights.draw(ax, pos, three_d=True)
         if overlay is not None:
             second_pts, second_label = overlay
             ax.scatter(
@@ -949,13 +1101,17 @@ class MontyPanel:
                 alpha=0.6,
                 label=second_label,
                 depthshade=False,
+                axlim_clip=True,
             )
         ax.scatter(
             mlh["location"][1],
             mlh["location"][0],
             mlh["location"][2],
             c=mlh_color,
-            s=15,
+            s=120 if mlh_color == "black" else 60,
+            label="MLH location",
+            depthshade=False,
+            axlim_clip=True,
         )
         if len(past_goals):
             ax.scatter(
@@ -967,6 +1123,7 @@ class MontyPanel:
                 s=70,
                 label="past goals",
                 depthshade=False,
+                axlim_clip=True,
             )
         if goal_marker is not None:
             location, sender = goal_marker
@@ -978,17 +1135,12 @@ class MontyPanel:
                 s=200,
                 label=f"goal ({sender})",
                 depthshade=False,
+                axlim_clip=True,
             )
-        if (
-            goal_marker is not None
-            or len(past_goals)
-            or overlay is not None
-            or highlighted
-        ):
-            ax.legend(fontsize=7, loc="upper right")
+        ax.legend(fontsize=7, loc="upper right")
         ax.set_title(f"MLH ({mlh['graph_id']})")
         ax.set_axis_off()
-        ax.set_aspect("equal")
+        self._frame_mlh(ax)
 
     def _show_mlh_2d(
         self,
@@ -1032,8 +1184,14 @@ class MontyPanel:
             graph_feature.get("pose_fully_defined"),
             graph_feature.get("pose_vectors"),
         )
-        draw_2d_segments(ax, x, y, colors, edge_mask, tangents)
-        highlighted = highlights.draw(ax, pos, three_d=False)
+        if highlights.replaces_graph:
+            center, half = frame_center_half(np.stack([x, y], axis=1))
+            ax.set_xlim(center[0] - half, center[0] + half)
+            ax.set_ylim(center[1] - half, center[1] + half)
+            ax.set_aspect("equal")
+        else:
+            draw_2d_segments(ax, x, y, colors, edge_mask, tangents)
+        highlights.draw(ax, pos, three_d=False)
         if overlay is not None:
             second_pts, second_label = overlay
             ax.plot(
@@ -1050,11 +1208,12 @@ class MontyPanel:
         ax.plot(
             mlh["location"][0],
             mlh["location"][1],
-            "x",
+            "o" if mlh_color == "black" else "x",
             color=mlh_color,
-            markersize=8,
-            markeredgewidth=2,
-            zorder=3,
+            markersize=11,
+            markeredgewidth=2.5,
+            label="MLH location",
+            zorder=7,
         )
         if len(past_goals):
             ax.plot(
@@ -1079,14 +1238,9 @@ class MontyPanel:
                 label=f"goal ({sender})",
                 zorder=6,
             )
-        if (
-            goal_marker is not None
-            or len(past_goals)
-            or overlay is not None
-            or highlighted
-        ):
-            ax.legend(fontsize=7, loc="upper right")
+        ax.legend(fontsize=7, loc="upper right")
         ax.set_title(f"MLH ({mlh['graph_id']})")
+        self._frame_mlh(ax)
 
 
 class DetailsPanel:

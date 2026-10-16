@@ -109,13 +109,13 @@ class LivePlotter(Plotter):
     displayed LM proposes such a goal, the selected channel switches to it.
 
     When the displayed LM's goal generator keeps a model-based salience for the
-    nodes of its object models (an `EvidenceGoalGenerator`), a "Model salience"
-    button on the MLH view toggles coloring the drawn graph's nodes whose salience
-    was reduced by explaining input. While it is on, a step on which the LM
-    propagated a received object ID switches the selected channel to the channel it
-    propagated through (taking precedence over following a new goal), and a
-    temporary slider along the bottom of the figure replays the latest propagation
-    through the drawn graph node by node.
+    nodes of its object models (an `EvidenceGoalGenerator`), a "Salience" button on
+    the MLH view cycles between showing no salience, the current salience of the
+    drawn graph's nodes, and the changes the latest step made to it (reductions by
+    sensed input, which a temporary slider replays node by node, and excitation by
+    a new goal). While salience is shown, a step on which the LM propagated a
+    received object ID, but generated no new goal, switches the selected channel to
+    the channel it propagated through. The mouse wheel zooms the MLH view.
     """
 
     _channel_view: ChannelView
@@ -155,7 +155,7 @@ class LivePlotter(Plotter):
         self.figsize = figsize
         self.attention_vis = attention_vis
         # Persists across episodes, unlike the per-episode figure and its widgets.
-        self._show_salience = False
+        self._salience_view = "off"
 
         self.fig = None
         self._controls = None
@@ -306,8 +306,8 @@ class LivePlotter(Plotter):
             self._channel_view,
             self._goal_trace,
             self._propagation_trace,
-            show_salience=self._show_salience,
-            on_toggle_salience=self._on_toggle_salience,
+            salience_view=self._salience_view,
+            on_change_salience_view=self._on_change_salience_view,
         )
         self._details = DetailsPanel(
             self.fig,
@@ -421,44 +421,56 @@ class LivePlotter(Plotter):
             self._banner_until = None
 
     def _follow_new_activity(self) -> None:
-        """Select the channel of the displayed LM's latest propagation or new goal.
+        """Select the channel of the displayed LM's new goal or latest propagation.
 
-        While model-based salience is shown, a propagation of a received object ID
-        on the latest step selects the channel it propagated through (keeping the
-        selected channel when it is one of them). Propagations of sensory features
-        happen on most steps, so they are not followed. Otherwise a new goal selects
-        the channel its target was selected from. Only applies while the displayed
-        LM is matching, and never re-selects on a repaint.
+        A new goal selects the channel its target was selected from, which is also
+        the channel whose salience the goal raised. Otherwise, while model-based
+        salience is shown, a propagation of a received object ID on the latest step
+        selects the channel it propagated through (keeping the selected channel
+        when it is one of them). Propagations of sensory features happen on most
+        steps, so they are not followed. Only applies while the displayed LM is
+        matching, and never re-selects on a repaint.
         """
         lm = self._channel_view.lm
         if self._lm_building_graph(lm):
             return
         lm_id = lm.learning_module_id
-        channel = None
-        propagations = self._propagation_trace.object_id_records(lm_id)
-        if self._show_salience and propagations:
-            channels = [record.input_channel for record in propagations]
-            if self._channel_view.channel not in channels:
-                channel = channels[0]
-        else:
-            channel = self._goal_trace.new_goal_channel_by_lm.get(lm_id)
+        channel = self._goal_trace.new_goal_channel_by_lm.get(lm_id)
+        if channel is None and self._salience_view != "off":
+            channel = self._object_id_propagation_channel(lm_id)
         if channel is not None and channel != self._channel_view.channel:
             self._channel_view.select_channel(channel)
             self._selector.refresh_labels()
 
-    def _on_toggle_salience(self, show: bool) -> None:
-        """Show or hide model-based salience, following this step's propagation.
+    def _object_id_propagation_channel(self, lm_id: str) -> str | None:
+        """The channel to select to see the latest step's object ID propagations.
 
         Args:
-            show: Whether model-based salience is now shown.
+            lm_id: The learning module whose propagations to follow.
+
+        Returns:
+            The channel of the LM's first object ID propagation on the latest step,
+            or `None` when there was none, or the selected channel had one.
         """
-        self._show_salience = show
-        if show:
-            lm_id = self._channel_view.lm.learning_module_id
-            propagations = self._propagation_trace.object_id_records(lm_id)
-            channels = [record.input_channel for record in propagations]
-            if channels and self._channel_view.channel not in channels:
-                self._channel_view.select_channel(channels[0])
+        propagations = self._propagation_trace.object_id_records(lm_id)
+        channels = [record.input_channel for record in propagations]
+        if not channels or self._channel_view.channel in channels:
+            return None
+        return channels[0]
+
+    def _on_change_salience_view(self, view: str) -> None:
+        """Switch the salience view, following this step's propagation when shown.
+
+        Args:
+            view: The new salience view.
+        """
+        self._salience_view = view
+        if view != "off":
+            channel = self._object_id_propagation_channel(
+                self._channel_view.lm.learning_module_id
+            )
+            if channel is not None:
+                self._channel_view.select_channel(channel)
                 self._selector.refresh_labels()
         self._redraw()
 
