@@ -164,6 +164,11 @@ class _NodeHighlights:
         """Whether the highlights color every node, so the graph is not drawn."""
         return self.view == "current" and self.salience is not None
 
+    @property
+    def graph_alpha(self) -> float:
+        """The opacity of the graph's own drawing, faded beneath this step's changes."""
+        return 0.5 if self.view == "step" else 1.0
+
     def _draw_step(
         self,
         ax: Axes,
@@ -1088,7 +1093,15 @@ class MontyPanel:
         # Points outside the (zoomed) limits are hidden rather than drawn over the
         # rest of the figure.
         if not highlights.replaces_graph:
-            ax.scatter(pos[:, 1], pos[:, 0], pos[:, 2], c="black", s=2, axlim_clip=True)
+            ax.scatter(
+                pos[:, 1],
+                pos[:, 0],
+                pos[:, 2],
+                c="black",
+                s=2,
+                alpha=highlights.graph_alpha,
+                axlim_clip=True,
+            )
         highlights.draw(ax, pos, three_d=True)
         if overlay is not None:
             second_pts, second_label = overlay
@@ -1190,7 +1203,9 @@ class MontyPanel:
             ax.set_ylim(center[1] - half, center[1] + half)
             ax.set_aspect("equal")
         else:
-            draw_2d_segments(ax, x, y, colors, edge_mask, tangents)
+            draw_2d_segments(
+                ax, x, y, colors, edge_mask, tangents, alpha=highlights.graph_alpha
+            )
         highlights.draw(ax, pos, three_d=False)
         if overlay is not None:
             second_pts, second_label = overlay

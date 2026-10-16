@@ -277,6 +277,7 @@ def draw_2d_segments(
     colors: npt.NDArray[np.float64],
     edge_mask: npt.NDArray[np.bool_],
     tangents: npt.NDArray[np.float64] | None,
+    alpha: float = 1.0,
 ) -> None:
     """Draw a planar cloud as hsv-colored dots with edge-oriented segments.
 
@@ -293,8 +294,16 @@ def draw_2d_segments(
         colors: The per-point `(N, 3)` RGB colors.
         edge_mask: The boolean `(N,)` mask of points where an edge defines the pose.
         tangents: The `(E, 2)` edge tangents of the masked points, or `None`.
+        alpha: The opacity of the dots and segments.
     """
-    ax.scatter(x[~edge_mask], y[~edge_mask], color=colors[~edge_mask], s=6, zorder=1)
+    ax.scatter(
+        x[~edge_mask],
+        y[~edge_mask],
+        color=colors[~edge_mask],
+        s=6,
+        alpha=alpha,
+        zorder=1,
+    )
     center, half = frame_center_half(np.stack([x, y], axis=1))
     if edge_mask.any() and tangents is not None and len(tangents):
         normed = tangents / np.clip(
@@ -311,6 +320,7 @@ def draw_2d_segments(
                 colors=colors[edge_mask],
                 linestyles="--",
                 linewidths=1.2,
+                alpha=alpha,
                 zorder=2,
             )
         )
