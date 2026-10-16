@@ -594,14 +594,10 @@ class MontyPanel:
             graph: The drawn graph.
 
         Returns:
-            One weight in [0, 1] per node, or `None` when inhibition is not shown,
-            or the drawn graph does not store object IDs (and so is never
-            inhibited).
+            One weight in [0, 1] per node, or `None` when inhibition is not shown.
         """
         gsg = self._inhibition_gsg()
-        if not self.show_inhibition or gsg is None:
-            return None
-        if "object_id" not in (graph.feature_mapping or {}):
+        if not self.show_inhibition or gsg is None or graph is None:
             return None
         return np.asarray(gsg.get_inhibition_weights(graph_id, channel), dtype=float)
 
@@ -689,6 +685,8 @@ class MontyPanel:
     def _replay_label(self, record: SpreadRecord | None) -> str | None:
         if record is None:
             return None
+        if record.object_id is None:
+            return "spread of similar features"
         names = self.channel_view.object_id_names(record.input_channel)
         name = names.get(int(record.object_id), f"object {int(record.object_id)}")
         return f"spread of {name}"

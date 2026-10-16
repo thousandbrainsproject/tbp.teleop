@@ -421,17 +421,19 @@ class LivePlotter(Plotter):
     def _follow_new_activity(self) -> None:
         """Select the channel of the displayed LM's latest spread or new goal.
 
-        While inhibition is shown, a spread on the latest step selects the channel it
-        spread through (keeping the selected channel when it is one of them).
-        Otherwise a new goal selects the channel its target was selected from. Only
-        applies while the displayed LM is matching, and never re-selects on a repaint.
+        While inhibition is shown, a spread of a received object ID on the latest
+        step selects the channel it spread through (keeping the selected channel
+        when it is one of them). Spreads of sensory features happen on most steps,
+        so they are not followed. Otherwise a new goal selects the channel its
+        target was selected from. Only applies while the displayed LM is matching,
+        and never re-selects on a repaint.
         """
         lm = self._channel_view.lm
         if self._lm_building_graph(lm):
             return
         lm_id = lm.learning_module_id
         channel = None
-        spreads = self._spread_trace.records_by_lm.get(lm_id)
+        spreads = self._object_id_spreads(lm_id)
         if self._show_inhibition and spreads:
             channels = [record.input_channel for record in spreads]
             if self._channel_view.channel not in channels:
@@ -451,12 +453,27 @@ class LivePlotter(Plotter):
         self._show_inhibition = show
         if show:
             lm_id = self._channel_view.lm.learning_module_id
-            spreads = self._spread_trace.records_by_lm.get(lm_id, [])
+            spreads = self._object_id_spreads(lm_id)
             channels = [record.input_channel for record in spreads]
             if channels and self._channel_view.channel not in channels:
                 self._channel_view.select_channel(channels[0])
                 self._selector.refresh_labels()
         self._redraw()
+
+    def _object_id_spreads(self, lm_id: str) -> list:
+        """The latest step's spreads of received object IDs by an LM.
+
+        Args:
+            lm_id: The learning module whose spreads to return.
+
+        Returns:
+            The spreads, excluding spreads of sensory features.
+        """
+        return [
+            record
+            for record in self._spread_trace.records_by_lm.get(lm_id, [])
+            if record.object_id is not None
+        ]
 
     def _render(self, observations: Observations, step: int) -> None:
         """Draw every section for one frame.
