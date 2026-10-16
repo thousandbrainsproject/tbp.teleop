@@ -29,7 +29,8 @@ from tbp.teleop.helpers import (
     EvidenceHistory,
     FeatureInset,
     GoalTrace,
-    SpreadTrace,
+    PropagationTrace,
+    ReturnInhibitionRecorder,
     corner_rect,
     draw_2d_segments,
     draw_buffer_series,
@@ -51,12 +52,12 @@ if TYPE_CHECKING:
         Observations,
         SensorModule,
     )
-    from tbp.monty.frameworks.models.goal_generation import SpreadRecord
+    from tbp.monty.frameworks.models.goal_generation import PropagationRecord
     from tbp.monty.frameworks.models.object_model import GraphObjectModel
 
-# Figure-fraction rectangle of the spread replay slider along the figure's bottom
-# edge, below the interactive buttons and the speed slider.
-SPREAD_SLIDER_BOTTOM, SPREAD_SLIDER_HEIGHT = 0.012, 0.022
+# Figure-fraction rectangle of the propagation replay slider along the figure's
+# bottom edge, below the interactive buttons and the speed slider.
+PROPAGATION_SLIDER_BOTTOM, PROPAGATION_SLIDER_HEIGHT = 0.012, 0.022
 
 
 @dataclass(frozen=True)
@@ -64,18 +65,17 @@ class _NodeHighlights:
     """Nodes of the drawn MLH graph to color over its point cloud.
 
     Attributes:
-        replay: The nodes a replayed spread has reached so far, in the order they
-            were reached, or `None` when no spread is being replayed.
-        replay_total: The number of nodes the replayed spread reached in total.
-        replay_label: The legend label of the replayed spread.
-        weights: The inhibition weight of every node, or `None` when not shown. Only
-            drawn when no spread is being replayed.
+        replay: The propagation being replayed, or `None` when none is.
+        progress: The number of nodes the replayed propagation has reached so far.
+        replay_label: The legend label of the replayed propagation.
+        salience: The model-based salience of every node, or `None` when not shown.
+            Only drawn when no propagation is being replayed.
     """
 
-    replay: npt.NDArray[np.int_] | None
-    replay_total: int
+    replay: PropagationRecord | None
+    progress: int
     replay_label: str | None
-    weights: npt.NDArray[np.float64] | None
+    salience: npt.NDArray[np.float64] | None
 
     def draw(self, ax: Axes, pos: npt.NDArray[np.float64], *, three_d: bool) -> bool:
         """Color the highlighted nodes on the MLH axis.
@@ -98,44 +98,94 @@ class _NodeHighlights:
 
         extra = {"depthshade": False} if three_d else {}
         if self.replay is not None:
-            if len(self.replay) == 0:
-                return False
-            ax.scatter(
-                *coords(pos[self.replay]),
-                c=np.arange(len(self.replay)),
-                cmap="viridis",
-                vmin=0,
-                vmax=max(self.replay_total - 1, 1),
-                s=12,
-                label=f"{self.replay_label} ({len(self.replay)}/{self.replay_total})",
-                zorder=4,
-                **extra,
-            )
-            ax.scatter(
-                *coords(pos[self.replay[-1]]),
-                facecolors="none",
-                edgecolors="magenta",
-                s=90,
-                linewidths=1.5,
-                zorder=5,
-                **extra,
-            )
-            return True
-        if self.weights is None:
+            return self._draw_replay(ax, pos, coords, extra)
+        if self.salience is None:
             return False
-        inhibited = np.nonzero(self.weights > 0)[0]
-        if len(inhibited) == 0:
+        reduced = np.nonzero(self.salience < 1.0)[0]
+        if len(reduced) == 0:
             return False
         ax.scatter(
-            *coords(pos[inhibited]),
-            c=self.weights[inhibited],
+            *coords(pos[reduced]),
+            c=1.0 - self.salience[reduced],
             cmap="Reds",
-            # Start the colormap below 0 so nearly decayed nodes stay visible.
+            # Start the colormap below 0 so nearly recovered nodes stay visible.
             vmin=-0.5,
             vmax=1.0,
             s=10,
-            label=f"inhibited ({len(inhibited)})",
+            label=(
+                f"salience reduced ({len(reduced)}, "
+                f"min {self.salience[reduced].min():.2f})"
+            ),
             zorder=4,
+            **extra,
+        )
+        return True
+
+    def _draw_replay(
+        self,
+        ax: Axes,
+        pos: npt.NDArray[np.float64],
+        coords: Callable[[npt.NDArray[np.float64]], tuple],
+        extra: dict,
+    ) -> bool:
+        """Color the nodes the replayed propagation has reached so far.
+
+        Nodes reached from the seeds are colored dark to light (viridis) by their
+        number of hops from the seeds, and nodes reached by a push-through yellow
+        to red by their number of hops from where it began, as in the
+        `EvidenceGoalGenerator`'s propagation explorer. The node reached last is
+        ringed.
+
+        Args:
+            ax: The MLH axis.
+            pos: The graph node positions, shape `(N, 3)`.
+            coords: Maps node positions to the axis's plot coordinates.
+            extra: Additional scatter keyword arguments for the axis.
+
+        Returns:
+            Whether anything with a legend label was drawn.
+        """
+        record = self.replay
+        if self.progress == 0:
+            return False
+        total = len(record.node_order)
+        nodes = np.asarray(record.node_order[: self.progress], dtype=int)
+        stage = np.asarray(record.stage[: self.progress])
+        colors = np.empty((total, 4))
+        for value in np.unique(record.stage):
+            in_stage = record.stage == value
+            hops = record.hops[in_stage]
+            fraction = hops / max(hops.max(), 1)
+            if value == 0:
+                colors[in_stage] = plt.get_cmap("viridis")(fraction)
+            else:
+                colors[in_stage] = plt.get_cmap("YlOrRd")(0.35 + 0.65 * fraction)
+        colors = colors[: self.progress]
+        from_seeds = stage == 0
+        ax.scatter(
+            *coords(pos[nodes[from_seeds]]),
+            c=colors[from_seeds],
+            s=12,
+            label=f"{self.replay_label} ({self.progress}/{total})",
+            zorder=4,
+            **extra,
+        )
+        if not from_seeds.all():
+            ax.scatter(
+                *coords(pos[nodes[~from_seeds]]),
+                c=colors[~from_seeds],
+                s=12,
+                label=f"pushed through ({np.count_nonzero(~from_seeds)})",
+                zorder=4,
+                **extra,
+            )
+        ax.scatter(
+            *coords(pos[nodes[-1]]),
+            facecolors="none",
+            edgecolors="magenta",
+            s=90,
+            linewidths=1.5,
+            zorder=5,
             **extra,
         )
         return True
@@ -287,12 +337,14 @@ class MontyPanel:
     states whether the selected channel has received input this episode and on the
     latest step (with the object ID, for a learning-module channel).
 
-    When the displayed LM's goal generator inhibits child objects (a
-    `ChildObjectsGoalGenerator`), an "Inhibition" button in the corner of the MLH
-    view toggles coloring the drawn graph's nodes by their inhibition weight. While
-    it is on, and the LM spread inhibition through the drawn graph on the latest
-    step, a temporary slider along the bottom of the figure replays that spread, from
-    the first node it reached to the last.
+    When the displayed LM's goal generator keeps a model-based salience for the
+    nodes of its object models (an `EvidenceGoalGenerator`), a "Model salience"
+    button in the corner of the MLH view toggles coloring the drawn graph's nodes
+    whose salience has been reduced (i.e. explained by earlier input), the more
+    strongly the lower their salience. While it is on, and the LM propagated a
+    salience reduction through the drawn graph on the latest step, a temporary slider
+    along the bottom of the figure replays that propagation, from the first node it
+    reached to the last.
     """
 
     def __init__(
@@ -301,41 +353,41 @@ class MontyPanel:
         spec,
         channel_view: ChannelView,
         goal_trace: GoalTrace,
-        spread_trace: SpreadTrace,
+        propagation_trace: PropagationTrace,
         *,
-        show_inhibition: bool,
-        on_toggle_inhibition: Callable[[bool], None],
+        show_salience: bool,
+        on_toggle_salience: Callable[[bool], None],
     ) -> None:
         """Bind the Monty column to its figure region and selection.
 
         Lays out the initial single 2D axis, matching the layout the placeholder and
-        inference 2D views start from, and the (initially hidden) inhibition button.
+        inference 2D views start from, and the (initially hidden) salience button.
 
         Args:
             fig: The figure to draw on.
             spec: The Monty column's gridspec subplot spec.
             channel_view: The selected LM/channel and per-channel feature accessors.
             goal_trace: The per-LM, per-graph trace of past model-frame goal targets.
-            spread_trace: The inhibition spreads of the latest step.
-            show_inhibition: Whether inhibition weights start out shown.
-            on_toggle_inhibition: Called with the new state when the inhibition
-                button is clicked; expected to repaint the figure.
+            propagation_trace: The salience propagations of the latest step.
+            show_salience: Whether model-based salience starts out shown.
+            on_toggle_salience: Called with the new state when the salience button
+                is clicked; expected to repaint the figure.
         """
         self.fig = fig
         self.spec = spec
         self.channel_view = channel_view
         self.goal_trace = goal_trace
-        self.spread_trace = spread_trace
-        self.show_inhibition = show_inhibition
-        self._on_toggle_inhibition = on_toggle_inhibition
+        self.propagation_trace = propagation_trace
+        self.show_salience = show_salience
+        self._on_toggle_salience = on_toggle_salience
         self._ax = fig.add_subplot(spec)
         self._mode: str | None = "single"
         self._projection: str | None = None
         self._proj_axes: list[Axes] = []
         self._inset: FeatureInset | None = None
-        self._inhibition_button = self._build_inhibition_button()
-        self._spread_slider: Slider | None = None
-        self._slider_record: SpreadRecord | None = None
+        self._salience_button = self._build_salience_button()
+        self._propagation_slider: Slider | None = None
+        self._slider_record: PropagationRecord | None = None
         monty = spec.get_position(fig)
         self._status_badge = fig.text(
             monty.x1,
@@ -386,7 +438,7 @@ class MontyPanel:
         Args:
             message: The text to display.
         """
-        self._hide_inhibition_controls()
+        self._hide_salience_controls()
         ax = self._ensure_projection(None)
         ax.cla()
         ax.set_axis_off()
@@ -411,7 +463,7 @@ class MontyPanel:
             channel: The selected input channel.
             pts: The channel's `(M, 3)` non-padded location points.
         """
-        self._hide_inhibition_controls()
+        self._hide_salience_controls()
         if isinstance(self.channel_view.resolve_sm_channel(channel), TwoDSensorModule):
             self._draw_selected_channel_2d(channel, pts)
             return
@@ -442,10 +494,10 @@ class MontyPanel:
         object's second most likely pose) is superimposed in light blue, posed
         relative to the MLH.
 
-        With inhibition shown, the drawn graph's inhibited nodes are colored by their
-        inhibition weight or, while a spread through the drawn graph is being
-        replayed, the nodes the spread reached so far are colored by the order in
-        which it reached them.
+        With model-based salience shown, the drawn graph's nodes with reduced
+        salience are colored by how far it is reduced or, while a propagation
+        through the drawn graph is being replayed, the nodes the propagation reached
+        so far are colored by how far from its start it reached them.
         """
         lm = self.channel_view.lm
         graph = None
@@ -469,18 +521,18 @@ class MontyPanel:
             or len(np.asarray(graph.pos)) == 0
         ):
             self.draw_placeholder(message)
-            self._inhibition_button.ax.set_visible(self._inhibition_gsg() is not None)
+            self._salience_button.ax.set_visible(self._salience_gsg() is not None)
             return
         pos = np.asarray(graph.pos)
 
-        self._inhibition_button.ax.set_visible(self._inhibition_gsg() is not None)
-        record = self._spread_to_replay(mlh["graph_id"], channel)
-        self._sync_spread_slider(record)
+        self._salience_button.ax.set_visible(self._salience_gsg() is not None)
+        record = self._propagation_to_replay(mlh["graph_id"], channel)
+        self._sync_propagation_slider(record)
         highlights = _NodeHighlights(
-            replay=self._replayed_nodes(record),
-            replay_total=len(record.node_order) if record is not None else 0,
+            replay=record,
+            progress=self._replay_progress(record),
             replay_label=self._replay_label(record),
-            weights=self._inhibition_weights(mlh["graph_id"], channel, graph),
+            salience=self._node_salience(mlh["graph_id"], channel, len(pos)),
         )
 
         color = self._mlh_marker_color(mlh, lm.object_evidence_threshold)
@@ -538,100 +590,110 @@ class MontyPanel:
             self.channel_view.lm.learning_module_id, graph_id, channel
         )
 
-    # ------------------------- Inhibition -------------------------
+    # ---------------------- Model-based salience ----------------------
 
-    def _build_inhibition_button(self) -> Button:
-        """Add the (initially hidden) inhibition toggle to the MLH view's corner.
+    def _build_salience_button(self) -> Button:
+        """Add the (initially hidden) salience toggle to the MLH view's corner.
 
         Returns:
             The toggle button.
         """
         monty = self.spec.get_position(self.fig)
-        ax = self.fig.add_axes([monty.x0, monty.y0, 0.09, 0.03])
+        ax = self.fig.add_axes([monty.x0, monty.y0, 0.11, 0.03])
         # Keep the button above the MLH axis, which is re-added whenever its
         # projection changes.
         ax.set_zorder(10)
-        button = Button(ax, self._inhibition_caption())
+        button = Button(ax, self._salience_caption())
         button.label.set_fontsize(8)
-        button.on_clicked(self._on_inhibition_clicked)
+        button.on_clicked(self._on_salience_clicked)
         ax.set_visible(False)
         return button
 
-    def _inhibition_caption(self) -> str:
-        return f"Inhibition: {'on' if self.show_inhibition else 'off'}"
+    def _salience_caption(self) -> str:
+        return f"Model salience: {'on' if self.show_salience else 'off'}"
 
-    def _on_inhibition_clicked(self, _event: object) -> None:
-        """Toggle showing inhibition weights.
+    def _on_salience_clicked(self, _event: object) -> None:
+        """Toggle showing model-based salience.
 
         Args:
             _event: The matplotlib button event (unused).
         """
-        self.show_inhibition = not self.show_inhibition
-        self._inhibition_button.label.set_text(self._inhibition_caption())
-        self._on_toggle_inhibition(self.show_inhibition)
+        self.show_salience = not self.show_salience
+        self._salience_button.label.set_text(self._salience_caption())
+        self._on_toggle_salience(self.show_salience)
 
-    def _hide_inhibition_controls(self) -> None:
-        self._inhibition_button.ax.set_visible(False)
-        self._sync_spread_slider(None)
+    def _hide_salience_controls(self) -> None:
+        self._salience_button.ax.set_visible(False)
+        self._sync_propagation_slider(None)
 
-    def _inhibition_gsg(self) -> object | None:
-        """The displayed LM's goal generator, if it inhibits child objects.
+    def _salience_gsg(self) -> object | None:
+        """The displayed LM's goal generator, if it keeps model-based salience.
 
         Returns:
-            The goal generator, or `None` when it has no inhibition weights.
+            The goal generator, or `None` when it has no model-based salience.
         """
         gsg = getattr(self.channel_view.lm, "gsg", None)
-        return gsg if hasattr(gsg, "get_inhibition_weights") else None
+        if hasattr(gsg, "get_salience") and hasattr(gsg, "model_salience"):
+            return gsg
+        return None
 
-    def _inhibition_weights(
-        self, graph_id: str, channel: str, graph: GraphObjectModel
+    def _node_salience(
+        self, graph_id: str, channel: str, num_nodes: int
     ) -> npt.NDArray[np.float64] | None:
-        """The inhibition weight of each node of the drawn graph, when shown.
+        """The model-based salience of each node of the drawn graph, when shown.
+
+        Only graphs whose salience the goal generator tracks are read, as reading
+        any other would start tracking it; an untracked graph's salience is 1 at
+        every node.
 
         Args:
             graph_id: The id of the MLH graph being drawn.
             channel: The input channel whose graph is being drawn.
-            graph: The drawn graph.
+            num_nodes: The number of nodes of the drawn graph.
 
         Returns:
-            One weight in [0, 1] per node, or `None` when inhibition is not shown.
+            One salience in [0, 1] per node, or `None` when salience is not shown.
         """
-        gsg = self._inhibition_gsg()
-        if not self.show_inhibition or gsg is None or graph is None:
+        gsg = self._salience_gsg()
+        if not self.show_salience or gsg is None:
             return None
-        return np.asarray(gsg.get_inhibition_weights(graph_id, channel), dtype=float)
+        if (graph_id, channel) not in gsg.model_salience.tracked():
+            return np.ones(num_nodes)
+        return np.array(gsg.get_salience(graph_id, channel), dtype=float)
 
-    def _spread_to_replay(self, graph_id: str, channel: str) -> SpreadRecord | None:
-        """The latest step's spread through the drawn graph, when inhibition is shown.
+    def _propagation_to_replay(
+        self, graph_id: str, channel: str
+    ) -> PropagationRecord | None:
+        """The latest step's propagation through the drawn graph, when shown.
 
         Args:
             graph_id: The id of the MLH graph being drawn.
             channel: The input channel whose graph is being drawn.
 
         Returns:
-            The spread, or `None` when inhibition is not shown or the displayed LM
-            did not spread through the drawn graph on the latest step.
+            The propagation, or `None` when salience is not shown or the displayed
+            LM did not propagate through the drawn graph on the latest step.
         """
-        if not self.show_inhibition:
+        if not self.show_salience:
             return None
-        return self.spread_trace.find(
+        return self.propagation_trace.find(
             self.channel_view.lm.learning_module_id, graph_id, channel
         )
 
-    def _sync_spread_slider(self, record: SpreadRecord | None) -> None:
-        """Show the replay slider for a spread, or remove it when there is none.
+    def _sync_propagation_slider(self, record: PropagationRecord | None) -> None:
+        """Show the replay slider for a propagation, or remove it when there is none.
 
-        The slider is only rebuilt when the spread changes, so its position is kept
-        while the same spread is redrawn (e.g. on a selector click).
+        The slider is only rebuilt when the propagation changes, so its position is
+        kept while the same propagation is redrawn (e.g. on a selector click).
 
         Args:
-            record: The spread to replay, or `None` to remove the slider.
+            record: The propagation to replay, or `None` to remove the slider.
         """
         if record is self._slider_record:
             return
-        if self._spread_slider is not None:
-            self._spread_slider.ax.remove()
-            self._spread_slider = None
+        if self._propagation_slider is not None:
+            self._propagation_slider.ax.remove()
+            self._propagation_slider = None
         self._slider_record = record
         if record is None:
             return
@@ -641,23 +703,23 @@ class MontyPanel:
         ax = self.fig.add_axes(
             [
                 monty.x0 + 0.1 * width,
-                SPREAD_SLIDER_BOTTOM,
+                PROPAGATION_SLIDER_BOTTOM,
                 0.8 * width,
-                SPREAD_SLIDER_HEIGHT,
+                PROPAGATION_SLIDER_HEIGHT,
             ]
         )
-        self._spread_slider = Slider(
+        self._propagation_slider = Slider(
             ax,
-            "Spread",
+            "Propagation",
             0,
             num_nodes,
             valinit=num_nodes,
             valstep=1,
             valfmt=f"%d / {num_nodes}",
         )
-        self._spread_slider.on_changed(self._on_spread_slider_changed)
+        self._propagation_slider.on_changed(self._on_propagation_slider_changed)
 
-    def _on_spread_slider_changed(self, _value: float) -> None:
+    def _on_propagation_slider_changed(self, _value: float) -> None:
         """Redraw the MLH view at the new replay position.
 
         Args:
@@ -666,30 +728,27 @@ class MontyPanel:
         self.draw_mlh()
         self.fig.canvas.draw_idle()
 
-    def _replayed_nodes(
-        self, record: SpreadRecord | None
-    ) -> npt.NDArray[np.int_] | None:
-        """The nodes the replayed spread has reached at the slider's position.
+    def _replay_progress(self, record: PropagationRecord | None) -> int:
+        """The number of nodes the replayed propagation has reached at the slider.
 
         Args:
-            record: The spread being replayed, or `None`.
+            record: The propagation being replayed, or `None`.
 
         Returns:
-            The reached nodes in the order they were reached, or `None` when no
-            spread is being replayed.
+            The slider's position, or 0 when no propagation is being replayed.
         """
-        if record is None or self._spread_slider is None:
-            return None
-        return np.asarray(record.node_order[: int(self._spread_slider.val)], dtype=int)
+        if record is None or self._propagation_slider is None:
+            return 0
+        return int(self._propagation_slider.val)
 
-    def _replay_label(self, record: SpreadRecord | None) -> str | None:
+    def _replay_label(self, record: PropagationRecord | None) -> str | None:
         if record is None:
             return None
         if record.object_id is None:
-            return "spread of similar features"
+            return "propagation of similar features"
         names = self.channel_view.object_id_names(record.input_channel)
         name = names.get(int(record.object_id), f"object {int(record.object_id)}")
-        return f"spread of {name}"
+        return f"propagation of {name}"
 
     def _second_hypothesis_overlay(
         self, graph_id: str
@@ -871,7 +930,7 @@ class MontyPanel:
             channel: The input channel whose graph is drawn.
             pos: The graph node positions, shape `(N, 3)`.
             mlh_color: The MLH location marker color.
-            highlights: The inhibited or spread-reached nodes to color.
+            highlights: The reduced-salience or propagation-reached nodes to color.
         """
         goal_marker = self._goal_in_model_frame(mlh["graph_id"], channel)
         past_goals = self._past_goals(mlh["graph_id"], channel)
@@ -954,7 +1013,7 @@ class MontyPanel:
             graph: The MLH graph object model.
             pos: The graph node positions, shape `(N, >=2)`.
             mlh_color: The MLH location marker color.
-            highlights: The inhibited or spread-reached nodes to color.
+            highlights: The reduced-salience or propagation-reached nodes to color.
         """
         goal_marker = self._goal_in_model_frame(mlh["graph_id"], channel)
         past_goals = self._past_goals(mlh["graph_id"], channel)
@@ -1741,22 +1800,24 @@ class SaliencePanel:
       scale so frames are comparable; any other range is scaled per frame.
     - Inhibition of return: the IoR weight in `[0, 1]` at each on-object pixel, i.e.
       how strongly the decaying kernels left at earlier fixations suppress it.
-    - After IoR: the on-object salience minus the IoR weights scaled by the module's
-      `ior_weight`, which is what the module turns into goal confidences (before
-      adding noise and range-normalizing). It shares the salience's `[0, 1]` scale,
-      so fixated spots go dark; values pushed below zero are clipped (shown by the
-      colorbar's extension). The inhibited region (IoR weight above
-      `IOR_CONTOUR_LEVEL`) is outlined so small inhibited spots stay findable.
+    - After IoR: the on-object salience less the scaled IoR weights, which is what
+      the module turns into goal confidences (before adding noise and
+      range-normalizing). It shares the salience's `[0, 1]` scale, so fixated spots
+      go dark; values pushed below zero are clipped (shown by the colorbar's
+      extension). The inhibited region (IoR weight above `IOR_CONTOUR_LEVEL`) is
+      outlined so small inhibited spots stay findable.
 
-    Off-object pixels carry no IoR (goals are only proposed on the object), so they
-    are drawn in a neutral gray in the IoR panels.
+    The sensor module does not record its IoR weights, so a
+    `ReturnInhibitionRecorder` captures them as the module applies them. Off-object
+    pixels carry no IoR (goals are only proposed on the object), so they are drawn
+    in a neutral gray in the IoR panels.
 
     The sensor module only records when configured with `save_raw_obs=true` (which
     installs a recording `SalienceSMTelemetry` rather than the no-op one, detected here
     by the telemetry carrying the recorded list), so the panel explains that
     requirement instead of drawing when it is off. It likewise shows a placeholder when
     no sensor module has a salience strategy, and in the IoR panels when the
-    telemetry predates IoR recording.
+    sensor module does not apply IoR the way the recorder expects.
     """
 
     CMAP: ClassVar[str] = "inferno"
@@ -1794,6 +1855,11 @@ class SaliencePanel:
             ),
             None,
         )
+        self._ior_recorder = (
+            ReturnInhibitionRecorder.attach(self._sm)
+            if hasattr(self._sm, "_decay_salience")
+            else None
+        )
 
     def draw(self) -> None:
         """Draw the salience and IoR heatmaps recorded for the most recent step."""
@@ -1822,15 +1888,14 @@ class SaliencePanel:
 
         self._draw_salience(np.asarray(maps[-1], dtype=float))
 
-        ior_maps = getattr(telemetry, "ior_maps", None)
-        inhibited_maps = getattr(telemetry, "inhibited_salience_maps", None)
-        if not ior_maps or not inhibited_maps:
+        images = self._ior_recorder.images() if self._ior_recorder else None
+        if images is None:
             for ax in (self._ior_ax, self._inhibited_ax):
                 self._draw_placeholder(ax, "no IoR recorded")
             return
-        ior = np.asarray(ior_maps[-1], dtype=float)
+        ior, inhibited = images
         self._draw_ior(ior)
-        self._draw_inhibited(np.asarray(inhibited_maps[-1], dtype=float), ior)
+        self._draw_inhibited(inhibited, ior)
 
     def _draw_salience(self, salience: npt.NDArray[np.float64]) -> None:
         """Draw the raw salience map.
@@ -1880,9 +1945,7 @@ class SaliencePanel:
             ior: The 2D IoR weights, NaN off-object, outlined over the map.
         """
         ax = self._inhibited_ax
-        ior_weight = getattr(self._sm, "_ior_weight", None)
-        suffix = f"\n(ior_weight {ior_weight:g})" if ior_weight is not None else ""
-        ax.set_title(f"Salience after IoR{suffix}", fontsize=8)
+        ax.set_title("Salience after IoR", fontsize=8)
         image = ax.imshow(
             inhibited, cmap=self._with_off_object(self.CMAP), vmin=0, vmax=1
         )

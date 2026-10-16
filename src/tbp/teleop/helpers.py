@@ -27,6 +27,9 @@ from tbp.monty.frameworks.models.evidence_matching.burst_sampling import (
 from tbp.monty.frameworks.models.evidence_matching.learning_module import (
     EvidenceGraphLM,
 )
+from tbp.monty.frameworks.models.salience.on_object_observation import (
+    on_object_observation,
+)
 from tbp.monty.frameworks.models.two_d_sensor_module import TwoDSensorModule
 from typing_extensions import Self
 
@@ -39,7 +42,7 @@ if TYPE_CHECKING:
         Monty,
         SensorModule,
     )
-    from tbp.monty.frameworks.models.goal_generation import SpreadRecord
+    from tbp.monty.frameworks.models.goal_generation import PropagationRecord
 
 try:  # matplotlib >= 3.9; `rcsetup.interactive_bk` was removed in 3.11
     from matplotlib.backends import BackendFilter, backend_registry
@@ -597,34 +600,35 @@ class GoalTrace:
         return np.array(locs, dtype=float).reshape(-1, 3)
 
 
-class SpreadTrace:
-    """The inhibition spreads each LM's goal generator performed on the latest step.
+class PropagationTrace:
+    """The salience propagations each LM's goal generator performed on the latest step.
 
-    A `ChildObjectsGoalGenerator` replaces its `spread_records` list on every step it
-    runs, so a list not seen before holds that step's spreads. On steps where the
-    generator does not run (e.g. location-only steps), the list is unchanged and no
-    spreads are reported. Pure data: the Monty section reads it to replay a spread.
+    An `EvidenceGoalGenerator` replaces its `propagation_records` list on every step
+    it runs, so a list not seen before holds that step's propagations (each reducing
+    the salience of the nodes it reached). On steps where the generator does not run
+    (e.g. location-only steps), the list is unchanged and no propagations are
+    reported. Pure data: the Monty section reads it to replay a propagation.
     """
 
     def __init__(self) -> None:
-        """Start with no spreads."""
-        self.records_by_lm: dict[str, list[SpreadRecord]] = {}
+        """Start with no propagations."""
+        self.records_by_lm: dict[str, list[PropagationRecord]] = {}
         self._last_records_by_lm: dict[str, object] = {}
 
     def clear(self) -> None:
-        """Drop all spreads, e.g. at an episode boundary."""
+        """Drop all propagations, e.g. at an episode boundary."""
         self.records_by_lm.clear()
         self._last_records_by_lm.clear()
 
     def record(self, learning_modules: list[LearningModule]) -> None:
-        """Keep the spreads each LM's goal generator performed since the last call.
+        """Keep the propagations each LM's goal generator performed since the last call.
 
         Args:
             learning_modules: All of the model's learning modules.
         """
         self.records_by_lm.clear()
         for lm in learning_modules:
-            records = getattr(getattr(lm, "gsg", None), "spread_records", None)
+            records = getattr(getattr(lm, "gsg", None), "propagation_records", None)
             lm_id = lm.learning_module_id
             if records is None or records is self._last_records_by_lm.get(lm_id):
                 continue
@@ -632,22 +636,121 @@ class SpreadTrace:
             if records:
                 self.records_by_lm[lm_id] = list(records)
 
-    def find(self, lm_id: str, graph_id: str, channel: str) -> SpreadRecord | None:
-        """The latest step's spread by an LM through one channel's graph.
+    def object_id_records(self, lm_id: str) -> list[PropagationRecord]:
+        """The latest step's propagations of received object IDs by an LM.
 
         Args:
-            lm_id: The learning module whose goal generator spread.
-            graph_id: The graph the spread went through.
-            channel: The input channel whose graph the spread went through.
+            lm_id: The learning module whose propagations to return.
 
         Returns:
-            The spread, or `None` when the LM did not spread through that graph on
-            the latest step.
+            The propagations, excluding those of sensory features.
+        """
+        return [
+            record
+            for record in self.records_by_lm.get(lm_id, [])
+            if record.object_id is not None
+        ]
+
+    def find(self, lm_id: str, graph_id: str, channel: str) -> PropagationRecord | None:
+        """The latest step's propagation by an LM through one channel's graph.
+
+        Args:
+            lm_id: The learning module whose goal generator propagated.
+            graph_id: The graph the propagation went through.
+            channel: The input channel whose graph the propagation went through.
+
+        Returns:
+            The propagation, or `None` when the LM did not propagate through that
+            graph on the latest step.
         """
         for record in self.records_by_lm.get(lm_id, []):
             if record.graph_id == graph_id and record.input_channel == channel:
                 return record
         return None
+
+
+class ReturnInhibitionRecorder:
+    """The inhibition of return a `SalienceSM` applied on its latest step.
+
+    The sensor module subtracts its inhibition-of-return (IoR) weights from the
+    salience of the on-object locations in `_decay_salience`, but does not record
+    either. The recorder therefore wraps that method on the sensor module instance,
+    returning its result unchanged, to keep the latest step's IoR weights and the
+    salience they leave behind, which `images` lays out as image-shaped maps.
+    """
+
+    def __init__(self, sm: SensorModule) -> None:
+        """Wrap a sensor module's `_decay_salience`; use `attach` instead.
+
+        Args:
+            sm: The salience sensor module to record.
+        """
+        self._sm = sm
+        self._decay_salience = sm._decay_salience
+        sm._decay_salience = self._record
+        self._ior_weights: npt.NDArray[np.float64] | None = None
+        self._inhibited: npt.NDArray[np.float64] | None = None
+        self._salience_map_index: int | None = None
+
+    @classmethod
+    def attach(cls, sm: SensorModule) -> Self:
+        """Record a sensor module, reusing the recorder already wrapping it, if any.
+
+        The figure, and so the salience panel, is rebuilt every episode, while the
+        sensor module persists, so wrapping it again would nest recorders.
+
+        Args:
+            sm: The salience sensor module to record.
+
+        Returns:
+            The sensor module's recorder.
+        """
+        existing = getattr(sm._decay_salience, "__self__", None)
+        if isinstance(existing, cls):
+            return existing
+        return cls(sm)
+
+    def _record(
+        self, salience: npt.NDArray[np.float64], ior_weights: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        inhibited = self._decay_salience(salience, ior_weights)
+        # The sensor module adds noise to the returned array in place.
+        self._inhibited = np.array(inhibited, dtype=float)
+        self._ior_weights = np.array(ior_weights, dtype=float)
+        # The step's salience map is recorded after this, at this index.
+        maps = getattr(self._sm._snapshot_telemetry, "salience_maps", None)
+        self._salience_map_index = len(maps) if maps is not None else None
+        return inhibited
+
+    def images(
+        self,
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]] | None:
+        """The latest recorded step's IoR weights and inhibited salience as images.
+
+        Returns:
+            The 2D IoR weights and the 2D salience left after IoR, both NaN
+            off-object, or `None` when the sensor module's telemetry did not record
+            the step they were applied on (e.g. while exploring).
+        """
+        telemetry = self._sm._snapshot_telemetry
+        maps = getattr(telemetry, "salience_maps", None)
+        raw_observations = getattr(telemetry, "raw_observations", None)
+        if (
+            self._ior_weights is None
+            or not maps
+            or not raw_observations
+            or self._salience_map_index != len(maps) - 1
+        ):
+            return None
+        mask = on_object_observation(raw_observations[-1], maps[-1]).on_object_mask
+        if np.count_nonzero(mask) != len(self._ior_weights):
+            return None
+        images = []
+        for values in (self._ior_weights, self._inhibited):
+            image = np.full(mask.shape, np.nan)
+            image[mask] = values
+            images.append(image)
+        return images[0], images[1]
 
 
 @dataclass(frozen=True)

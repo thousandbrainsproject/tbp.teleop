@@ -28,7 +28,7 @@ from tbp.teleop.helpers import (
     ChannelView,
     EvidenceHistory,
     GoalTrace,
-    SpreadTrace,
+    PropagationTrace,
     draw_section_dividers,
     is_interactive_backend,
 )
@@ -108,12 +108,14 @@ class LivePlotter(Plotter):
     learning-module channel) is only drawn on that channel's graph, and when the
     displayed LM proposes such a goal, the selected channel switches to it.
 
-    When the displayed LM's goal generator inhibits explained child objects (a
-    `ChildObjectsGoalGenerator`), an "Inhibition" button on the MLH view toggles
-    coloring the drawn graph's nodes by their inhibition weight. While it is on, a
-    step on which the LM spread inhibition switches the selected channel to the
-    channel it spread through (taking precedence over following a new goal), and a
-    temporary slider along the bottom of the figure replays the spread node by node.
+    When the displayed LM's goal generator keeps a model-based salience for the
+    nodes of its object models (an `EvidenceGoalGenerator`), a "Model salience"
+    button on the MLH view toggles coloring the drawn graph's nodes whose salience
+    was reduced by explaining input. While it is on, a step on which the LM
+    propagated a received object ID switches the selected channel to the channel it
+    propagated through (taking precedence over following a new goal), and a
+    temporary slider along the bottom of the figure replays the latest propagation
+    through the drawn graph node by node.
     """
 
     _channel_view: ChannelView
@@ -153,7 +155,7 @@ class LivePlotter(Plotter):
         self.figsize = figsize
         self.attention_vis = attention_vis
         # Persists across episodes, unlike the per-episode figure and its widgets.
-        self._show_inhibition = False
+        self._show_salience = False
 
         self.fig = None
         self._controls = None
@@ -219,7 +221,7 @@ class LivePlotter(Plotter):
         )
         self._history = EvidenceHistory()
         self._goal_trace = GoalTrace()
-        self._spread_trace = SpreadTrace()
+        self._propagation_trace = PropagationTrace()
         self._last_observations = None
         self._last_step = None
         self._supervised_lm_ids = supervised_lm_ids
@@ -303,9 +305,9 @@ class LivePlotter(Plotter):
             self._monty_spec,
             self._channel_view,
             self._goal_trace,
-            self._spread_trace,
-            show_inhibition=self._show_inhibition,
-            on_toggle_inhibition=self._on_toggle_inhibition,
+            self._propagation_trace,
+            show_salience=self._show_salience,
+            on_toggle_salience=self._on_toggle_salience,
         )
         self._details = DetailsPanel(
             self.fig,
@@ -380,11 +382,11 @@ class LivePlotter(Plotter):
             if prev_step is None or step <= prev_step:
                 self._history.clear()
                 self._goal_trace.clear()
-                self._spread_trace.clear()
+                self._propagation_trace.clear()
             history_step = step
         self._history.accumulate(self.model.learning_modules, history_step)
         self._goal_trace.record(self.model.learning_modules)
-        self._spread_trace.record(self.model.learning_modules)
+        self._propagation_trace.record(self.model.learning_modules)
         self._observe_jump(
             step, new_episode=prev_step is not None and step <= prev_step
         )
@@ -419,23 +421,23 @@ class LivePlotter(Plotter):
             self._banner_until = None
 
     def _follow_new_activity(self) -> None:
-        """Select the channel of the displayed LM's latest spread or new goal.
+        """Select the channel of the displayed LM's latest propagation or new goal.
 
-        While inhibition is shown, a spread of a received object ID on the latest
-        step selects the channel it spread through (keeping the selected channel
-        when it is one of them). Spreads of sensory features happen on most steps,
-        so they are not followed. Otherwise a new goal selects the channel its
-        target was selected from. Only applies while the displayed LM is matching,
-        and never re-selects on a repaint.
+        While model-based salience is shown, a propagation of a received object ID
+        on the latest step selects the channel it propagated through (keeping the
+        selected channel when it is one of them). Propagations of sensory features
+        happen on most steps, so they are not followed. Otherwise a new goal selects
+        the channel its target was selected from. Only applies while the displayed
+        LM is matching, and never re-selects on a repaint.
         """
         lm = self._channel_view.lm
         if self._lm_building_graph(lm):
             return
         lm_id = lm.learning_module_id
         channel = None
-        spreads = self._object_id_spreads(lm_id)
-        if self._show_inhibition and spreads:
-            channels = [record.input_channel for record in spreads]
+        propagations = self._propagation_trace.object_id_records(lm_id)
+        if self._show_salience and propagations:
+            channels = [record.input_channel for record in propagations]
             if self._channel_view.channel not in channels:
                 channel = channels[0]
         else:
@@ -444,36 +446,21 @@ class LivePlotter(Plotter):
             self._channel_view.select_channel(channel)
             self._selector.refresh_labels()
 
-    def _on_toggle_inhibition(self, show: bool) -> None:
-        """Show or hide inhibition weights, following this step's spread if shown.
+    def _on_toggle_salience(self, show: bool) -> None:
+        """Show or hide model-based salience, following this step's propagation.
 
         Args:
-            show: Whether inhibition weights are now shown.
+            show: Whether model-based salience is now shown.
         """
-        self._show_inhibition = show
+        self._show_salience = show
         if show:
             lm_id = self._channel_view.lm.learning_module_id
-            spreads = self._object_id_spreads(lm_id)
-            channels = [record.input_channel for record in spreads]
+            propagations = self._propagation_trace.object_id_records(lm_id)
+            channels = [record.input_channel for record in propagations]
             if channels and self._channel_view.channel not in channels:
                 self._channel_view.select_channel(channels[0])
                 self._selector.refresh_labels()
         self._redraw()
-
-    def _object_id_spreads(self, lm_id: str) -> list:
-        """The latest step's spreads of received object IDs by an LM.
-
-        Args:
-            lm_id: The learning module whose spreads to return.
-
-        Returns:
-            The spreads, excluding spreads of sensory features.
-        """
-        return [
-            record
-            for record in self._spread_trace.records_by_lm.get(lm_id, [])
-            if record.object_id is not None
-        ]
 
     def _render(self, observations: Observations, step: int) -> None:
         """Draw every section for one frame.
