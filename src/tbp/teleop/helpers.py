@@ -32,6 +32,7 @@ from typing_extensions import Self
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
+    from tbp.monty.cmp import Message
     from tbp.monty.frameworks.models.abstract_monty_classes import (
         LearningModule,
         Monty,
@@ -586,6 +587,23 @@ class ChannelView:
             None,
         )
 
+    def received_message(self, channel: str | None) -> Message | None:
+        """Return the message the displayed LM received on an LM channel this step.
+
+        Args:
+            channel: The learning-module channel to read.
+
+        Returns:
+            The received message, or `None` when nothing arrived on the channel.
+        """
+        source_lm = self.resolve_lm_channel(channel)
+        percepts = self.lm.buffer.get_all_input_percepts()
+        if source_lm is None or not percepts:
+            return None
+        source_index = self.model.learning_modules.index(source_lm)
+        sent = self.model.learning_module_outputs[source_index]
+        return sent if any(p is sent for p in percepts[-1]) else None
+
     def simulator_sm(self) -> tuple[SensorModule | None, str | None]:
         """Return the sensor module to drive the Simulator section.
 
@@ -928,22 +946,23 @@ class FeatureInset:
             self._draw_surface(pose_vectors, color, rotation)
 
     def _draw_lm_name(self, rect: list[float], channel: str) -> None:
-        """Show the name of the object being passed on a learning-module channel.
+        """Show the name of the object received on a learning-module channel.
+
+        The name is decoded from the `object_id` of the message the displayed LM
+        received this step, so a step without a message shows "no input".
 
         Args:
             rect: The `[left, bottom, width, height]` inset rectangle.
             channel: The learning-module channel.
         """
         self.ensure("text", rect)
-        ax = self.clear()
-        source_lm = self.channel_view.resolve_lm_channel(channel)
-        name = "-"
-        if source_lm is not None:
-            mlh = source_lm._get_current_mlh()
-            graph_id = mlh.get("graph_id") if mlh else None
-            if graph_id and graph_id != "no_observations_yet":
-                name = str(graph_id)
-        ax.text(0.5, 0.5, name, ha="center", va="center", transform=ax.transAxes)
+        message = self.channel_view.received_message(channel)
+        if message is None:
+            self._draw_message("no input")
+            return
+        object_id = int(message.non_morphological_features["object_id"])
+        names = self.channel_view.object_id_names(channel)
+        self._draw_message(names.get(object_id, f"object {object_id}"))
 
     def _draw_message(self, message: str) -> None:
         """Clear the inset and show a centered message.
