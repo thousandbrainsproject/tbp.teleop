@@ -29,6 +29,7 @@ from tbp.teleop.helpers import (
     draw_graph_3d,
     is_3d,
     planar_style,
+    remove_axes,
 )
 
 if TYPE_CHECKING:
@@ -293,9 +294,9 @@ class MontyPanel:
 
     def _clear_axes(self) -> None:
         """Remove the main Monty axis and any projection axes below it."""
-        self._ax.remove()
+        remove_axes(self._ax)
         for ax in self._proj_axes:
-            ax.remove()
+            remove_axes(ax)
         self._proj_axes = []
 
     def _ensure_projection(self, projection: str | None) -> Axes:
@@ -516,10 +517,10 @@ class DetailsPanel:
     def _clear_axes(self) -> None:
         """Remove every main and projection axis in the Details column."""
         for ax in self._axes:
-            ax.remove()
+            remove_axes(ax)
         for axes in self._proj_axes:
             for ax in axes:
-                ax.remove()
+                remove_axes(ax)
         self._axes = []
         self._proj_axes = []
 

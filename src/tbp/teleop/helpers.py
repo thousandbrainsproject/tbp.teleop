@@ -50,6 +50,25 @@ def is_interactive_backend() -> bool:
     return mpl.get_backend() in mpl.rcsetup.interactive_bk
 
 
+def remove_axes(ax: Axes) -> None:
+    """Remove an axis from its figure and disconnect its canvas callbacks.
+
+    A 3D axis connects mouse handlers to the figure canvas when created, but
+    matplotlib does not disconnect them on `remove`. Until the removed axis is
+    garbage-collected, every mouse release would still reach its handler and fail on
+    its now-`None` figure.
+
+    Args:
+        ax: The axis to remove.
+    """
+    callbacks = ax.figure.canvas.callbacks
+    for event_callbacks in list(callbacks.callbacks.values()):
+        for cid, ref in list(event_callbacks.items()):
+            if getattr(ref(), "__self__", None) is ax:
+                callbacks.disconnect(cid)
+    ax.remove()
+
+
 def unit(vec: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """Return `vec` normalized to unit length, or unchanged if near zero.
 
@@ -910,7 +929,6 @@ class FeatureInset:
         self.fig = fig
         self.channel_view = channel_view
         self.ax: Axes | None = None
-        self.projection: str | None = None
         self._border = None
         self._title = None
         self._rect: tuple[float, ...] | None = None
@@ -926,16 +944,19 @@ class FeatureInset:
             The inset axis.
         """
         self._ensure_frame(rect)
-        mpl_projection = "3d" if projection == "3d" else None
-        current_mpl = "3d" if self.projection == "3d" else None
-        if self.ax is not None and current_mpl == mpl_projection:
+        want_3d = projection == "3d"
+        # Text draws on either projection, so it reuses the current axis rather than
+        # flipping between 3D and 2D on every "no input" step.
+        if self.ax is not None and (
+            projection == "text" or (self.ax.name == "3d") == want_3d
+        ):
             self.ax.set_position(rect)
-            self.projection = projection
             return self.ax
         if self.ax is not None:
-            self.ax.remove()
-        self.ax = self.fig.add_axes(rect, projection=mpl_projection, zorder=10)
-        self.projection = projection
+            remove_axes(self.ax)
+        self.ax = self.fig.add_axes(
+            rect, projection="3d" if want_3d else None, zorder=10
+        )
         return self.ax
 
     def _ensure_frame(self, rect: list[float]) -> None:
@@ -989,11 +1010,13 @@ class FeatureInset:
 
     def remove(self) -> None:
         """Remove the inset axis, border, and title from the figure."""
-        for artist in (self.ax, self._border, self._title):
+        if self.ax is not None:
+            remove_axes(self.ax)
+        for artist in (self._border, self._title):
             if artist is not None:
                 artist.remove()
         self.ax = self._border = self._title = None
-        self.projection = self._rect = None
+        self._rect = None
 
     def draw(self, channel: str | None, rect: list[float]) -> None:
         """Draw one channel's live input feature into the inset.
@@ -1111,7 +1134,7 @@ class FeatureInset:
             message: The text to display (e.g. "off object").
         """
         ax = self.clear()
-        text = ax.text2D if self.projection == "3d" else ax.text
+        text = ax.text2D if ax.name == "3d" else ax.text
         text(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes)
 
     def _draw_surface(
