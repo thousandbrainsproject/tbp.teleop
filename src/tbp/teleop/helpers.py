@@ -793,6 +793,37 @@ class ChannelView:
             return None
         return valid
 
+    def model_graph(self, channel: str, graph_id: str) -> GraphObjectModel | None:
+        """Return an LM channel's source object model.
+
+        All of a graph's input channels share the object's reference frame, so the
+        graph's first sensor-module channel is used (else its first channel).
+
+        Args:
+            channel: The learning-module channel whose source LM holds the model.
+            graph_id: The object model to read.
+
+        Returns:
+            The object model, or `None` when the source LM, graph, or its node
+            locations are unavailable.
+        """
+        source_lm = self.resolve_lm_channel(channel)
+        if not isinstance(source_lm, EvidenceGraphLM):
+            return None
+        if graph_id not in source_lm.graph_memory.get_memory_ids():
+            return None
+        graph_channels = source_lm.get_input_channels_in_graph(graph_id)
+        if not graph_channels:
+            return None
+        sender_types = source_lm.buffer.channel_sender_types
+        sm_channels = [c for c in graph_channels if sender_types.get(c) == "SM"]
+        graph_channel = sm_channels[0] if sm_channels else graph_channels[0]
+        graph = source_lm.graph_memory.get_graph(graph_id, graph_channel)
+        pos = getattr(graph, "pos", None)
+        if pos is None or len(pos) == 0:
+            return None
+        return graph
+
     def object_id_names(self, channel: str) -> dict[int, str]:
         """Map an LM channel's numeric object ids back to their object names.
 
@@ -865,8 +896,8 @@ class FeatureInset:
 
     `draw` renders the selected channel's live feature into the inset, reading the
     channel resolution from a `ChannelView`: a 2D sensor module's detected edge, a 3D
-    sensor module's local surface and normal, or the name of the object passed on a
-    learning-module channel.
+    sensor module's local surface and normal, or the object model received on a
+    learning-module channel with the sensed location on it.
     """
 
     def __init__(self, fig: Figure, channel_view: ChannelView) -> None:
@@ -969,7 +1000,7 @@ class FeatureInset:
 
         The content depends on the channel's source: a 2D sensor module draws its
         detected edge, a 3D sensor module draws its local surface and normal, and a
-        learning-module channel shows the name of the object currently being passed.
+        learning-module channel shows the received object model and location.
 
         Args:
             channel: The channel whose live feature is drawn.
@@ -984,7 +1015,7 @@ class FeatureInset:
             sm = self.channel_view.resolve_sm_channel(channel)
             self._draw_from_sm(rect, sm)
         elif channel is not None and sender_type == "LM":
-            self._draw_lm_name(rect, channel)
+            self._draw_from_lm(rect, channel)
         else:
             self.ensure("text", rect)
             self._draw_message("no channel")
@@ -1032,24 +1063,46 @@ class FeatureInset:
             rotation = sm.state.rotation if sm.state is not None else None
             self._draw_surface(pose_vectors, color, rotation)
 
-    def _draw_lm_name(self, rect: list[float], channel: str) -> None:
-        """Show the name of the object received on a learning-module channel.
+    def _draw_from_lm(self, rect: list[float], channel: str) -> None:
+        """Draw the object model received on a learning-module channel.
 
-        The name is decoded from the `object_id` of the message the displayed LM
-        received this step, so a step without a message shows "no input".
+        The object is decoded from the `object_id` of the message the displayed LM
+        received this step, so a step without a message shows "no input". The source
+        LM's model of that object is drawn in its own reference frame, with the
+        received `location_rel_model` marked on it when the message carries one. Falls
+        back to the object name when the model is not available.
 
         Args:
             rect: The `[left, bottom, width, height]` inset rectangle.
             channel: The learning-module channel.
         """
-        self.ensure("text", rect)
         message = self.channel_view.received_message(channel)
         if message is None:
+            self.ensure("text", rect)
             self._draw_message("no input")
             return
-        object_id = int(message.non_morphological_features["object_id"])
+        features = message.non_morphological_features
+        object_id = int(features["object_id"])
         names = self.channel_view.object_id_names(channel)
-        self._draw_message(names.get(object_id, f"object {object_id}"))
+        name = names.get(object_id, f"object {object_id}")
+        graph = self.channel_view.model_graph(channel, name)
+        if graph is None:
+            self.ensure("text", rect)
+            self._draw_message(name)
+            return
+
+        location = features.get("location_rel_model")
+        if is_3d(np.asarray(graph.pos)):
+            self.ensure("3d", rect)
+            ax = self.clear()
+            draw_graph_3d(ax, graph, location, "red")
+            ax.view_init(elev=30, azim=-60)
+            ax.text2D(0.5, 0.02, name, ha="center", fontsize=7, transform=ax.transAxes)
+        else:
+            self.ensure("2d", rect)
+            ax = self.clear()
+            draw_graph_2d(ax, graph, location, "red")
+            ax.text(0.5, 0.02, name, ha="center", fontsize=7, transform=ax.transAxes)
 
     def _draw_message(self, message: str) -> None:
         """Clear the inset and show a centered message.
