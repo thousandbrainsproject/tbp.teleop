@@ -69,6 +69,22 @@ def remove_axes(ax: Axes) -> None:
     ax.remove()
 
 
+def terminal_state_color(terminal_state: str | None) -> str:
+    """Color an LM's location marker by whether it has recognized the object.
+
+    An LM only passes its output to a higher LM once it reaches the `"match"`
+    terminal state (and is on the object), so a green marker means the LM is in a
+    state to send its MLH up.
+
+    Args:
+        terminal_state: The LM's current terminal state.
+
+    Returns:
+        `"tab:green"` in the `"match"` terminal state, else `"red"`.
+    """
+    return "tab:green" if terminal_state == "match" else "red"
+
+
 def unit(vec: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """Return `vec` normalized to unit length, or unchanged if near zero.
 
@@ -1126,7 +1142,8 @@ class FeatureInset:
 
         The object is decoded from the received message's `object_id`. The source LM's
         model of that object is drawn in its own reference frame, with the received
-        `location_rel_model` marked on it when the message carries one. Falls back to
+        `location_rel_model` marked on it when the message carries one, green when the
+        source LM is in the `"match"` terminal state and red otherwise. Falls back to
         the object name when the model is not available.
 
         Args:
@@ -1145,16 +1162,18 @@ class FeatureInset:
             return
 
         location = features.get("location_rel_model")
+        source_lm = self.channel_view.resolve_lm_channel(channel)
+        marker_color = terminal_state_color(source_lm.terminal_state)
         if is_3d(np.asarray(graph.pos)):
             self.ensure("3d", rect)
             ax = self.clear()
-            draw_graph_3d(ax, graph, location, "red")
+            draw_graph_3d(ax, graph, location, marker_color)
             ax.view_init(elev=30, azim=-60)
             ax.text2D(0.5, 0.02, name, ha="center", fontsize=7, transform=ax.transAxes)
         else:
             self.ensure("2d", rect)
             ax = self.clear()
-            draw_graph_2d(ax, graph, location, "red")
+            draw_graph_2d(ax, graph, location, marker_color)
             ax.text(0.5, 0.02, name, ha="center", fontsize=7, transform=ax.transAxes)
 
     def _draw_message(self, message: str) -> None:

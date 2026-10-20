@@ -30,6 +30,7 @@ from tbp.teleop.helpers import (
     is_3d,
     planar_style,
     remove_axes,
+    terminal_state_color,
 )
 
 if TYPE_CHECKING:
@@ -273,7 +274,7 @@ class MontyPanel:
             self.draw_placeholder("No MLH")
             return
 
-        color = self._mlh_marker_color(mlh, lm.object_evidence_threshold)
+        color = terminal_state_color(lm.terminal_state)
         if is_3d(pos):
             ax = self._ensure_projection("3d")
             ax.cla()
@@ -384,21 +385,6 @@ class MontyPanel:
         sender_types = lm.buffer.channel_sender_types
         sm_channels = [c for c in channels if sender_types.get(c) == "SM"]
         return sm_channels[0] if sm_channels else None
-
-    @staticmethod
-    def _mlh_marker_color(mlh: dict, evidence_threshold: float | None) -> str:
-        """Color the MLH marker by whether its evidence clears the threshold.
-
-        Args:
-            mlh: The current most likely hypothesis.
-            evidence_threshold: The object evidence threshold, or `None`.
-
-        Returns:
-            `"red"` when above threshold (or threshold unknown), else `"gray"`.
-        """
-        if evidence_threshold is None:
-            return "red"
-        return "red" if mlh["evidence"] > evidence_threshold else "gray"
 
 
 class DetailsPanel:
