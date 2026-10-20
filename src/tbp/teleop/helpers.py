@@ -38,6 +38,7 @@ if TYPE_CHECKING:
         Monty,
         SensorModule,
     )
+    from tbp.monty.frameworks.models.object_model import GraphObjectModel
 
 
 def is_interactive_backend() -> bool:
@@ -304,6 +305,92 @@ def draw_2d_segments(
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_aspect("equal")
+
+
+def graph_style(
+    graph: GraphObjectModel, n: int
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.bool_], npt.NDArray | None]:
+    """Resolve per-node colors, an edge mask, and edge tangents for an object model.
+
+    Reads the graph's stored features and styles them with `planar_style`, so stored
+    models render the same way as the buffer views.
+
+    Args:
+        graph: The object model to style.
+        n: The number of nodes in the graph.
+
+    Returns:
+        The `(n, 3)` colors, the `(n,)` edge mask, and the edge tangents (or `None`).
+    """
+    fm = graph.feature_mapping
+    graph_feature = {
+        name: np.asarray(graph.get_values_for_feature(name))
+        for name in ("hsv", "pose_fully_defined", "pose_vectors")
+        if name in fm
+    }
+    return planar_style(
+        n,
+        graph_feature.get("hsv"),
+        graph_feature.get("pose_fully_defined"),
+        graph_feature.get("pose_vectors"),
+    )
+
+
+def draw_graph_3d(
+    ax: Axes,
+    graph: GraphObjectModel,
+    location: npt.NDArray[np.float64] | None,
+    marker_color: str,
+) -> None:
+    """Draw a 3D object model as an hsv-colored point cloud with a location marker.
+
+    Axes are plotted in `y, x, z` order. The caller clears the axis beforehand.
+
+    Args:
+        ax: The 3D axis to draw into.
+        graph: The object model to draw.
+        location: The location in the model's frame to mark, or `None`.
+        marker_color: The location marker color.
+    """
+    pos = np.asarray(graph.pos)
+    colors, _, _ = graph_style(graph, len(pos))
+    ax.scatter(pos[:, 1], pos[:, 0], pos[:, 2], c=colors, s=2)
+    if location is not None:
+        ax.scatter(location[1], location[0], location[2], c=marker_color, s=15)
+    ax.set_axis_off()
+    ax.set_aspect("equal")
+
+
+def draw_graph_2d(
+    ax: Axes,
+    graph: GraphObjectModel,
+    location: npt.NDArray[np.float64] | None,
+    marker_color: str,
+) -> None:
+    """Draw a planar object model as hsv-colored, edge-oriented segments.
+
+    The caller clears the axis beforehand.
+
+    Args:
+        ax: The 2D axis to draw into.
+        graph: The object model to draw.
+        location: The location in the model's frame to mark, or `None`.
+        marker_color: The location marker color.
+    """
+    pos = np.asarray(graph.pos)
+    x, y = pos[:, 0], pos[:, 1]
+    colors, edge_mask, tangents = graph_style(graph, len(pos))
+    draw_2d_segments(ax, x, y, colors, edge_mask, tangents)
+    if location is not None:
+        ax.plot(
+            location[0],
+            location[1],
+            "x",
+            color=marker_color,
+            markersize=8,
+            markeredgewidth=2,
+            zorder=3,
+        )
 
 
 def draw_section_dividers(fig: Figure, sim_spec, monty_spec, details_spec) -> None:

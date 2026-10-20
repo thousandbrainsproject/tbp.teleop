@@ -25,6 +25,8 @@ from tbp.teleop.helpers import (
     corner_rect,
     draw_2d_segments,
     draw_buffer_series,
+    draw_graph_2d,
+    draw_graph_3d,
     is_3d,
     planar_style,
 )
@@ -38,7 +40,6 @@ if TYPE_CHECKING:
         Observations,
         SensorModule,
     )
-    from tbp.monty.frameworks.models.object_model import GraphObjectModel
 
 
 class SimulatorPanel:
@@ -274,10 +275,13 @@ class MontyPanel:
         color = self._mlh_marker_color(mlh, lm.object_evidence_threshold)
         if is_3d(pos):
             ax = self._ensure_projection("3d")
-            self._show_mlh_3d(ax, mlh, pos, color)
+            ax.cla()
+            draw_graph_3d(ax, graph, mlh["location"], color)
         else:
             ax = self._ensure_projection(None)
-            self._show_mlh_2d(ax, mlh, graph, pos, color)
+            ax.cla()
+            draw_graph_2d(ax, graph, mlh["location"], color)
+        ax.set_title(f"MLH ({mlh['graph_id']})")
 
     def draw_feature_inset(self) -> None:
         """Draw the Monty section's "Input Feature" inset for the selected channel."""
@@ -394,73 +398,6 @@ class MontyPanel:
         if evidence_threshold is None:
             return "red"
         return "red" if mlh["evidence"] > evidence_threshold else "gray"
-
-    def _show_mlh_3d(
-        self, ax: Axes, mlh: dict, pos: npt.NDArray[np.float64], mlh_color: str
-    ) -> None:
-        """Render a 3D graph as a point cloud with the MLH location marked.
-
-        Args:
-            ax: The 3D Monty axis.
-            mlh: The current most likely hypothesis.
-            pos: The graph node positions, shape `(N, 3)`.
-            mlh_color: The MLH location marker color.
-        """
-        ax.cla()
-        ax.scatter(pos[:, 1], pos[:, 0], pos[:, 2], c="black", s=2)
-        ax.scatter(
-            mlh["location"][1],
-            mlh["location"][0],
-            mlh["location"][2],
-            c=mlh_color,
-            s=15,
-        )
-        ax.set_title(f"MLH ({mlh['graph_id']})")
-        ax.set_axis_off()
-        ax.set_aspect("equal")
-
-    def _show_mlh_2d(
-        self,
-        ax: Axes,
-        mlh: dict,
-        graph: GraphObjectModel,
-        pos: npt.NDArray[np.float64],
-        mlh_color: str,
-    ) -> None:
-        """Render a 2D SM graph as hsv-colored, edge-oriented segments.
-
-        Args:
-            ax: The 2D Monty axis.
-            mlh: The current most likely hypothesis.
-            graph: The MLH graph object model.
-            pos: The graph node positions, shape `(N, >=2)`.
-            mlh_color: The MLH location marker color.
-        """
-        ax.cla()
-        x, y = pos[:, 0], pos[:, 1]
-        fm = graph.feature_mapping
-        graph_feature = {
-            name: np.asarray(graph.get_values_for_feature(name))
-            for name in ("hsv", "pose_fully_defined", "pose_vectors")
-            if name in fm
-        }
-        colors, edge_mask, tangents = planar_style(
-            len(x),
-            graph_feature.get("hsv"),
-            graph_feature.get("pose_fully_defined"),
-            graph_feature.get("pose_vectors"),
-        )
-        draw_2d_segments(ax, x, y, colors, edge_mask, tangents)
-        ax.plot(
-            mlh["location"][0],
-            mlh["location"][1],
-            "x",
-            color=mlh_color,
-            markersize=8,
-            markeredgewidth=2,
-            zorder=3,
-        )
-        ax.set_title(f"MLH ({mlh['graph_id']})")
 
 
 class DetailsPanel:
