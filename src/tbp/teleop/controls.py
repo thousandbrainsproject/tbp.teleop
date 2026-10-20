@@ -438,6 +438,7 @@ class SelectorBar:
         self.fig = fig
         self.channel_view = channel_view
         self._on_change = on_change
+        self._repaint_timer = None
         monty = spec.get_position(fig)
         width = monty.x1 - monty.x0
         bottom, height = 0.91, 0.03
@@ -467,7 +468,7 @@ class SelectorBar:
         """
         self.channel_view.cycle_lm()
         self.refresh_labels()
-        self._on_change()
+        self._schedule_repaint()
 
     def _on_cycle_channel(self, _event: object) -> None:
         """Advance to the next input channel of the displayed LM and repaint.
@@ -478,4 +479,25 @@ class SelectorBar:
         if not self.channel_view.cycle_channel():
             return
         self.refresh_labels()
+        self._schedule_repaint()
+
+    def _schedule_repaint(self) -> None:
+        """Repaint once the click's mouse event has finished dispatching.
+
+        Matplotlib dispatches an event to a snapshot of its handlers, so repainting
+        inside the click would still deliver this release to the handlers of any 3D
+        axis the repaint removes, failing on their now-`None` figure. A single-shot
+        timer runs the repaint right after, and still fires while a blocking event loop
+        is running.
+        """
+        timer = self.fig.canvas.new_timer(interval=0)
+        timer.single_shot = True
+        timer.add_callback(self._repaint)
+        # Keep a reference so the timer is not garbage-collected before it fires.
+        self._repaint_timer = timer
+        timer.start()
+
+    def _repaint(self) -> None:
+        """Run the scheduled repaint."""
+        self._repaint_timer = None
         self._on_change()
