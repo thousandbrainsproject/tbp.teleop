@@ -693,22 +693,36 @@ class ChannelView:
             None,
         )
 
-    def received_message(self, channel: str | None) -> Message | None:
-        """Return the message the displayed LM received on an LM channel this step.
+    def received_message(self, channel: str | None) -> tuple[Message | None, bool]:
+        """Return the message routed to the displayed LM on a channel this step.
+
+        Monty's own `_collect_inputs_to_lm` re-applies its routing rules (each sender's
+        `pass_message`, and LM input only arriving alongside SM input) to the messages
+        built at the start of the latest step, so a motor-only step routes nothing. A
+        routed message counts as used when the LM processed its features: it is
+        flagged `process_features_in_lm` and is among the percepts the LM logged on its
+        latest step (a location-only step only displaces hypotheses and logs nothing).
 
         Args:
-            channel: The learning-module channel to read.
+            channel: The channel to read.
 
         Returns:
-            The received message, or `None` when nothing arrived on the channel.
+            The routed message (or `None` when nothing arrived on the channel) and
+            whether the displayed LM used it.
         """
-        source_lm = self.resolve_lm_channel(channel)
+        if channel is None:
+            return None, False
+        routed = self.model._collect_inputs_to_lm(self.lm_index)
+        message = next((m for m in routed if m.sender_id == channel), None)
+        if message is None:
+            return None, False
         percepts = self.lm.buffer.get_all_input_percepts()
-        if source_lm is None or not percepts:
-            return None
-        source_index = self.model.learning_modules.index(source_lm)
-        sent = self.model.learning_module_outputs[source_index]
-        return sent if any(p is sent for p in percepts[-1]) else None
+        used = bool(
+            message.process_features_in_lm
+            and percepts
+            and any(p is message for p in percepts[-1])
+        )
+        return message, used
 
     def simulator_sm(self) -> tuple[SensorModule | None, str | None]:
         """Return the sensor module to drive the Simulator section.
@@ -997,6 +1011,23 @@ class FeatureInset:
             self._title.set_position((left + width / 2, bottom + height + 0.005))
         self._rect = tuple(rect)
 
+    def _set_status(self, *, used: bool | None) -> None:
+        """Mark whether the receiving LM used the drawn input.
+
+        Args:
+            used: `True` for a green "used" frame, `False` for a red "dropped" frame,
+                or `None` for the plain frame when no input is drawn.
+        """
+        if used is None:
+            color, width, title = "black", 1.0, "Input Feature"
+        elif used:
+            color, width, title = "tab:green", 2.5, "Input Feature (used)"
+        else:
+            color, width, title = "tab:red", 2.5, "Input Feature (dropped)"
+        self._border.set_edgecolor(color)
+        self._border.set_linewidth(width)
+        self._title.set_text(title)
+
     def clear(self) -> Axes:
         """Clear the inset to a transparent, axis-off surface.
 
@@ -1021,9 +1052,12 @@ class FeatureInset:
     def draw(self, channel: str | None, rect: list[float]) -> None:
         """Draw one channel's live input feature into the inset.
 
-        The content depends on the channel's source: a 2D sensor module draws its
-        detected edge, a 3D sensor module draws its local surface and normal, and a
-        learning-module channel shows the received object model and location.
+        Draws the message routed to the displayed LM on the channel this step, or "no
+        input" when nothing arrived. The content depends on the channel's source: a 2D
+        sensor module draws its detected edge, a 3D sensor module draws its local
+        surface and normal, and a learning-module channel shows the received object
+        model and location. The frame is green ("used") when the LM processed the
+        input's features and red ("dropped") when it did not.
 
         Args:
             channel: The channel whose live feature is drawn.
@@ -1034,17 +1068,24 @@ class FeatureInset:
             if channel is not None
             else None
         )
-        if sender_type == "SM":
-            sm = self.channel_view.resolve_sm_channel(channel)
-            self._draw_from_sm(rect, sm)
-        elif channel is not None and sender_type == "LM":
-            self._draw_from_lm(rect, channel)
-        else:
+        message, used = self.channel_view.received_message(channel)
+        if sender_type not in {"SM", "LM"}:
             self.ensure("text", rect)
             self._draw_message("no channel")
+        elif message is None:
+            self.ensure("text", rect)
+            self._draw_message("no input")
+        elif sender_type == "SM":
+            sm = self.channel_view.resolve_sm_channel(channel)
+            self._draw_from_sm(rect, sm, message)
+        else:
+            self._draw_from_lm(rect, channel, message)
+        self._set_status(used=None if message is None else used)
 
-    def _draw_from_sm(self, rect: list[float], sm: SensorModule | None) -> None:
-        """Draw a sensor module's detected feature, colored by the sensed hsv.
+    def _draw_from_sm(
+        self, rect: list[float], sm: SensorModule | None, message: Message
+    ) -> None:
+        """Draw a sensor module's received feature, colored by the sensed hsv.
 
         For a 3D sensor module the inset is a small 3D axis showing the local surface as
         a tilted square plane with an arrow along its outward normal. For a 2D sensor
@@ -1055,18 +1096,12 @@ class FeatureInset:
         Args:
             rect: The `[left, bottom, width, height]` inset rectangle.
             sm: The sensor module feeding the channel.
+            message: The sensor module's message received this step.
         """
         is_2d = isinstance(sm, TwoDSensorModule)
         self.ensure("2d" if is_2d else "3d", rect)
-        processed = sm.processed_obs if sm is not None else []
-        if not processed:
-            self._draw_message("no pose")
-            return
-        obs = processed[-1]
-        morph, non_morph = (
-            obs["morphological_features"],
-            obs["non_morphological_features"],
-        )
+        morph = message.morphological_features
+        non_morph = message.non_morphological_features
         pose_vectors = morph.get("pose_vectors")
         if pose_vectors is None:
             self._draw_message("off object")
@@ -1086,24 +1121,19 @@ class FeatureInset:
             rotation = sm.state.rotation if sm.state is not None else None
             self._draw_surface(pose_vectors, color, rotation)
 
-    def _draw_from_lm(self, rect: list[float], channel: str) -> None:
+    def _draw_from_lm(self, rect: list[float], channel: str, message: Message) -> None:
         """Draw the object model received on a learning-module channel.
 
-        The object is decoded from the `object_id` of the message the displayed LM
-        received this step, so a step without a message shows "no input". The source
-        LM's model of that object is drawn in its own reference frame, with the
-        received `location_rel_model` marked on it when the message carries one. Falls
-        back to the object name when the model is not available.
+        The object is decoded from the received message's `object_id`. The source LM's
+        model of that object is drawn in its own reference frame, with the received
+        `location_rel_model` marked on it when the message carries one. Falls back to
+        the object name when the model is not available.
 
         Args:
             rect: The `[left, bottom, width, height]` inset rectangle.
             channel: The learning-module channel.
+            message: The source LM's message received this step.
         """
-        message = self.channel_view.received_message(channel)
-        if message is None:
-            self.ensure("text", rect)
-            self._draw_message("no input")
-            return
         features = message.non_morphological_features
         object_id = int(features["object_id"])
         names = self.channel_view.object_id_names(channel)
