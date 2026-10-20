@@ -482,18 +482,10 @@ class SelectorBar:
         self._schedule_repaint()
 
     def _schedule_repaint(self) -> None:
-        """Repaint once the click's mouse event has finished dispatching.
-
-        Matplotlib dispatches an event to a snapshot of its handlers, so repainting
-        inside the click would still deliver this release to the handlers of any 3D
-        axis the repaint removes, failing on their now-`None` figure. A single-shot
-        timer runs the repaint right after, and still fires while a blocking event loop
-        is running.
-        """
+        """Repaint once the click's mouse event has finished dispatching."""
         timer = self.fig.canvas.new_timer(interval=0)
         timer.single_shot = True
         timer.add_callback(self._repaint)
-        # Keep a reference so the timer is not garbage-collected before it fires.
         self._repaint_timer = timer
         timer.start()
 

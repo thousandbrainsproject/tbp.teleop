@@ -56,7 +56,8 @@ def remove_axes(ax: Axes) -> None:
     A 3D axis connects mouse handlers to the figure canvas when created, but
     matplotlib does not disconnect them on `remove`. Until the removed axis is
     garbage-collected, every mouse release would still reach its handler and fail on
-    its now-`None` figure.
+    its now-`None` figure. This method disconnects those leftover callbacks before
+    removing the axes.
 
     Args:
         ax: The axis to remove.
@@ -347,9 +348,6 @@ def graph_style(
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.bool_], npt.NDArray | None]:
     """Resolve per-node colors, an edge mask, and edge tangents for an object model.
 
-    Reads the graph's stored features and styles them with `planar_style`, so stored
-    models render the same way as the buffer views.
-
     Args:
         graph: The object model to style.
         n: The number of nodes in the graph.
@@ -379,8 +377,6 @@ def draw_graph_3d(
 ) -> None:
     """Draw a 3D object model as an hsv-colored point cloud with a location marker.
 
-    Axes are plotted in `y, x, z` order. The caller clears the axis beforehand.
-
     Args:
         ax: The 3D axis to draw into.
         graph: The object model to draw.
@@ -403,8 +399,6 @@ def draw_graph_2d(
     marker_color: str,
 ) -> None:
     """Draw a planar object model as hsv-colored, edge-oriented segments.
-
-    The caller clears the axis beforehand.
 
     Args:
         ax: The 2D axis to draw into.
@@ -712,13 +706,6 @@ class ChannelView:
     def received_message(self, channel: str | None) -> tuple[Message | None, bool]:
         """Return the message routed to the displayed LM on a channel this step.
 
-        Monty's own `_collect_inputs_to_lm` re-applies its routing rules (each sender's
-        `pass_message`, and LM input only arriving alongside SM input) to the messages
-        built at the start of the latest step, so a motor-only step routes nothing. A
-        routed message counts as used when the LM processed its features: it is
-        flagged `process_features_in_lm` and is among the percepts the LM logged on its
-        latest step (a location-only step only displaces hypotheses and logs nothing).
-
         Args:
             channel: The channel to read.
 
@@ -843,10 +830,13 @@ class ChannelView:
         return valid
 
     def model_graph(self, channel: str, graph_id: str) -> GraphObjectModel | None:
-        """Return an LM channel's source object model.
+        """Return the source LM's model of a child object, for an LM input channel.
 
-        All of a graph's input channels share the object's reference frame, so the
-        graph's first sensor-module channel is used (else its first channel).
+        This is the sending LM's graph of the object, in the child's own reference
+        frame, which is the frame `location_rel_model` is expressed in. The source LM
+        keeps one graph per object for each of its input channels, all in that same
+        frame, so a sensor-module channel's graph is preferred for its sensed features
+        (e.g. hsv), otherwise the first channel is used.
 
         Args:
             channel: The learning-module channel whose source LM holds the model.
@@ -946,7 +936,7 @@ class FeatureInset:
     `draw` renders the selected channel's live feature into the inset, reading the
     channel resolution from a `ChannelView`: a 2D sensor module's detected edge, a 3D
     sensor module's local surface and normal, or the object model received on a
-    learning-module channel with the sensed location on it.
+    learning-module channel with the sensed location on it (if available).
     """
 
     def __init__(self, fig: Figure, channel_view: ChannelView) -> None:
@@ -975,8 +965,6 @@ class FeatureInset:
         """
         self._ensure_frame(rect)
         want_3d = projection == "3d"
-        # Text draws on either projection, so it reuses the current axis rather than
-        # flipping between 3D and 2D on every "no input" step.
         if self.ax is not None and (
             projection == "text" or (self.ax.name == "3d") == want_3d
         ):
@@ -1142,9 +1130,10 @@ class FeatureInset:
 
         The object is decoded from the received message's `object_id`. The source LM's
         model of that object is drawn in its own reference frame, with the received
-        `location_rel_model` marked on it when the message carries one, green when the
-        source LM is in the `"match"` terminal state and red otherwise. Falls back to
-        the object name when the model is not available.
+        `location_rel_model` marked on it when the message carries one. The marker is
+        always the `"match"` color, since an LM only passes its output up from the
+        `"match"` terminal state. Falls back to the object name when the model is not
+        available.
 
         Args:
             rect: The `[left, bottom, width, height]` inset rectangle.
@@ -1162,8 +1151,7 @@ class FeatureInset:
             return
 
         location = features.get("location_rel_model")
-        source_lm = self.channel_view.resolve_lm_channel(channel)
-        marker_color = terminal_state_color(source_lm.terminal_state)
+        marker_color = terminal_state_color("match")
         if is_3d(np.asarray(graph.pos)):
             self.ensure("3d", rect)
             ax = self.clear()
