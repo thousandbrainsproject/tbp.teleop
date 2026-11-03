@@ -41,14 +41,21 @@ Either activate the environment (`source .venv/bin/activate`) or prefix commands
 
 ## Experiments
 
-Define your experiments in the `src/tbp/teleop/conf/experiment` directory.
-You'll need to pass the `src/tbp/teleop/conf` path as part of your run command
-via the Hydra `-cd src/tbp/teleop/conf` option.
+To run tbp.teleop with config files in your working tbp.monty checkout, run:
+
+```bash
+uv run python run.py experiment=supervised_pre_training_cows_small_compositional
+```
+
+Alternatively, define your experiments in the `src/tbp/teleop/conf/experiment` directory.
+
+Note that the `src/tbp/teleop/conf` directory is added to Hydra's config search path
+automatically by a Hydra plugin (`src/hydra_plugins`).
 
 After installing the environment, to run an experiment, run:
 
 ```bash
-uv run python run.py -cd src/tbp/teleop/conf experiment=example
+uv run python run.py experiment=example
 ```
 
 
@@ -76,13 +83,21 @@ Or select one at run time as an inline override. Use `+hooks=` to add the hook
 when the experiment does not already list one in its `defaults`:
 
 ```bash
-uv run python run.py -cd src/tbp/teleop/conf experiment=example +hooks=interactive
+uv run python run.py experiment=example +hooks=interactive
 # OR
-uv run python run.py -cd src/tbp/teleop/conf experiment=example +hooks=monitor
+uv run python run.py experiment=example +hooks=monitor
 ```
 
 If the experiment already includes a hook in its `defaults` list, drop the `+` to
 swap it instead (for example, `hooks=interactive`).
+
+You can also append config overrides as required, for example:
+
+```bash
+uv run python run.py experiment=example +hooks=interactive logging=basic_warning_monty_runs
+```
+
+to run with `logging=basic_warning_monty_runs` rather than defaults which may use Wandb.
 
 ## Development
 
