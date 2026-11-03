@@ -44,7 +44,7 @@ Either activate the environment (`source .venv/bin/activate`) or prefix commands
 To run tbp.teleop with config files in your working tbp.monty checkout, run:
 
 ```bash
-uv run python run.py experiment=your_experiment_name
+uv run python run.py experiment=example
 ```
 
 For example:
