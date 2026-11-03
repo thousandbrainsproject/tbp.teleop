@@ -31,7 +31,7 @@ From the root of this repository, run:
 uv sync --extra dev --extra gui --extra simulator_mujoco
 ```
 
-This creates a `.venv` with a Python version satisfying `requires-python` (3.10 or newer) and installs the locked dependencies from `uv.lock`. The extras are:
+This creates a `.venv` with a Python version satisfying `requires-python` (3.13 or newer) and installs the locked dependencies from `uv.lock`. The extras are:
 
 - `dev` — formatter, linter, type checker, and test dependencies.
 - `gui` — PyQt5, the interactive GUI backend (QtAgg) required by the live plotter.
@@ -44,20 +44,18 @@ Either activate the environment (`source .venv/bin/activate`) or prefix commands
 To run tbp.teleop with config files in your working tbp.monty checkout, run:
 
 ```bash
+uv run python run.py experiment=your_experiment_name
+```
+
+For example:
+
+```bash
 uv run python run.py experiment=supervised_pre_training_cows_small_compositional
 ```
 
-Alternatively, define your experiments in the `src/tbp/teleop/conf/experiment` directory.
-
 Note that the `src/tbp/teleop/conf` directory is added to Hydra's config search path
-automatically by a Hydra plugin (`src/hydra_plugins`).
-
-After installing the environment, to run an experiment, run:
-
-```bash
-uv run python run.py experiment=example
-```
-
+automatically by a Hydra plugin (`src/hydra_plugins`). This contains the hook configs (see below),
+and can also be used to define your own experiments locally under `src/tbp/teleop/conf/experiment`.
 
 ## Live Plotter
 

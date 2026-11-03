@@ -26,7 +26,7 @@ dynamic = ["version"]
 license = { file = "LICENSE" }
 name = "tbp.teleop"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 
 [project.optional-dependencies]
 # Forwards Monty's own simulator extra, so the simulator is installed alongside
@@ -110,7 +110,7 @@ junit_family = "xunit1"
 
 [tool.ruff]
 line-length = 88
-target-version = "py38"
+target-version = "py313"
 
 [tool.ruff.format]
 indent-style = "space"
