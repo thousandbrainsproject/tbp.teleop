@@ -32,11 +32,13 @@ from typing_extensions import Self
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
     from matplotlib.figure import Figure
+    from tbp.monty.cmp import Message
     from tbp.monty.frameworks.models.abstract_monty_classes import (
         LearningModule,
         Monty,
         SensorModule,
     )
+    from tbp.monty.frameworks.models.object_model import GraphObjectModel
 
 try:  # matplotlib >= 3.9; `rcsetup.interactive_bk` was removed in 3.11
     from matplotlib.backends import BackendFilter, backend_registry
@@ -56,6 +58,42 @@ def is_interactive_backend() -> bool:
         True if the current backend is an interactive (GUI) backend.
     """
     return mpl.get_backend().lower() in _INTERACTIVE_BACKENDS
+
+
+def remove_axes(ax: Axes) -> None:
+    """Remove an axis from its figure and disconnect its canvas callbacks.
+
+    A 3D axis connects mouse handlers to the figure canvas when created, but
+    matplotlib does not disconnect them on `remove`. Until the removed axis is
+    garbage-collected, every mouse release would still reach its handler and fail on
+    its now-`None` figure. This method disconnects those leftover callbacks before
+    removing the axes.
+
+    Args:
+        ax: The axis to remove.
+    """
+    callbacks = ax.figure.canvas.callbacks
+    for event_callbacks in list(callbacks.callbacks.values()):
+        for cid, ref in list(event_callbacks.items()):
+            if getattr(ref(), "__self__", None) is ax:
+                callbacks.disconnect(cid)
+    ax.remove()
+
+
+def terminal_state_color(terminal_state: str | None) -> str:
+    """Color an LM's location marker by whether it has recognized the object.
+
+    An LM only passes its output to a higher LM once it reaches the `"match"`
+    terminal state (and is on the object), so a green marker means the LM is in a
+    state to send its MLH up.
+
+    Args:
+        terminal_state: The LM's current terminal state.
+
+    Returns:
+        `"tab:green"` in the `"match"` terminal state, else `"red"`.
+    """
+    return "tab:green" if terminal_state == "match" else "red"
 
 
 def unit(vec: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
@@ -313,6 +351,85 @@ def draw_2d_segments(
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_aspect("equal")
+
+
+def graph_style(
+    graph: GraphObjectModel, n: int
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.bool_], npt.NDArray | None]:
+    """Resolve per-node colors, an edge mask, and edge tangents for an object model.
+
+    Args:
+        graph: The object model to style.
+        n: The number of nodes in the graph.
+
+    Returns:
+        The `(n, 3)` colors, the `(n,)` edge mask, and the edge tangents (or `None`).
+    """
+    fm = graph.feature_mapping
+    graph_feature = {
+        name: np.asarray(graph.get_values_for_feature(name))
+        for name in ("hsv", "pose_fully_defined", "pose_vectors")
+        if name in fm
+    }
+    return planar_style(
+        n,
+        graph_feature.get("hsv"),
+        graph_feature.get("pose_fully_defined"),
+        graph_feature.get("pose_vectors"),
+    )
+
+
+def draw_graph_3d(
+    ax: Axes,
+    graph: GraphObjectModel,
+    location: npt.NDArray[np.float64] | None,
+    marker_color: str,
+) -> None:
+    """Draw a 3D object model as an hsv-colored point cloud with a location marker.
+
+    Args:
+        ax: The 3D axis to draw into.
+        graph: The object model to draw.
+        location: The location in the model's frame to mark, or `None`.
+        marker_color: The location marker color.
+    """
+    pos = np.asarray(graph.pos)
+    colors, _, _ = graph_style(graph, len(pos))
+    ax.scatter(pos[:, 1], pos[:, 0], pos[:, 2], c=colors, s=2)
+    if location is not None:
+        ax.scatter(location[1], location[0], location[2], c=marker_color, s=15)
+    ax.set_axis_off()
+    ax.set_aspect("equal")
+
+
+def draw_graph_2d(
+    ax: Axes,
+    graph: GraphObjectModel,
+    location: npt.NDArray[np.float64] | None,
+    marker_color: str,
+) -> None:
+    """Draw a planar object model as hsv-colored, edge-oriented segments.
+
+    Args:
+        ax: The 2D axis to draw into.
+        graph: The object model to draw.
+        location: The location in the model's frame to mark, or `None`.
+        marker_color: The location marker color.
+    """
+    pos = np.asarray(graph.pos)
+    x, y = pos[:, 0], pos[:, 1]
+    colors, edge_mask, tangents = graph_style(graph, len(pos))
+    draw_2d_segments(ax, x, y, colors, edge_mask, tangents)
+    if location is not None:
+        ax.plot(
+            location[0],
+            location[1],
+            "x",
+            color=marker_color,
+            markersize=8,
+            markeredgewidth=2,
+            zorder=3,
+        )
 
 
 def draw_section_dividers(fig: Figure, sim_spec, monty_spec, details_spec) -> None:
@@ -596,6 +713,30 @@ class ChannelView:
             None,
         )
 
+    def received_message(self, channel: str | None) -> tuple[Message | None, bool]:
+        """Return the message routed to the displayed LM on a channel this step.
+
+        Args:
+            channel: The channel to read.
+
+        Returns:
+            The routed message (or `None` when nothing arrived on the channel) and
+            whether the displayed LM used it.
+        """
+        if channel is None:
+            return None, False
+        routed = self.model._collect_inputs_to_lm(self.lm_index)
+        message = next((m for m in routed if m.sender_id == channel), None)
+        if message is None:
+            return None, False
+        percepts = self.lm.buffer.get_all_input_percepts()
+        used = bool(
+            message.process_features_in_lm
+            and percepts
+            and any(p is message for p in percepts[-1])
+        )
+        return message, used
+
     def simulator_sm(self) -> tuple[SensorModule | None, str | None]:
         """Return the sensor module to drive the Simulator section.
 
@@ -618,30 +759,61 @@ class ChannelView:
                     return sm, channel
         return None, None
 
-    @staticmethod
-    def channel_points(
-        locations: npt.NDArray[np.float64],
-    ) -> npt.NDArray[np.float64]:
-        """Return the non-NaN-padded location rows for one buffer channel.
+    def channel_valid_mask(self, channel: str) -> npt.NDArray[np.bool_] | None:
+        """Return the global buffer rows where `channel` contributed features.
+
+        The buffer stores a single global location per step (the mean of the sensor
+        module locations) but pads each channel's features lazily, so a channel's
+        feature arrays may be shorter than the global location array and must be padded
+        to the buffer length before masking. The `on_object` feature is written for a
+        channel on exactly the steps it contributed features, so its non-NaN rows are
+        the channel's valid rows.
 
         Args:
-            locations: The padded `(N, 3)` location buffer for a single channel.
+            channel: The buffer input channel to read.
 
         Returns:
-            The `(M, 3)` rows whose first coordinate is not NaN, or an empty `(0, 3)`
-            array when the buffer is empty or not yet shaped.
+            A length-`N` boolean mask over the global locations, or `None` when the
+            channel has no features yet or the padded mask cannot be aligned.
         """
-        if locations.ndim != 2 or locations.shape[0] == 0 or locations.shape[1] < 3:
+        channel_feats = self.lm.buffer.features.get(channel)
+        if not channel_feats or "on_object" not in channel_feats:
+            return None
+        padded = self.lm.buffer._pad_to_target_length(
+            np.asarray(channel_feats["on_object"], dtype=float)
+        )
+        if padded.ndim != 2 or padded.shape[0] != self.lm.buffer.locations.shape[0]:
+            return None
+        return ~np.isnan(padded[:, 0])
+
+    def channel_points(self, channel: str) -> npt.NDArray[np.float64]:
+        """Return the global location rows where `channel` contributed features.
+
+        The buffer stores one global location per step, so a channel's point cloud is
+        the global locations masked to the steps that channel was active (see
+        `channel_valid_mask`).
+
+        Args:
+            channel: The buffer input channel to read.
+
+        Returns:
+            The `(M, 3)` rows for the channel's valid steps, or an empty `(0, 3)` array
+            when the channel has no observations yet or the buffer is not yet shaped.
+        """
+        locations = np.asarray(self.lm.buffer.locations, dtype=float)
+        mask = self.channel_valid_mask(channel)
+        if mask is None or locations.ndim != 2 or locations.shape[1] < 3:
             return np.empty((0, 3))
-        return locations[~np.isnan(locations[:, 0])]
+        return locations[mask]
 
     def aligned_feature(
         self, channel: str, attr: str
     ) -> npt.NDArray[np.float64] | None:
         """Return one buffer feature aligned row-for-row with a channel's valid points.
 
-        The buffer pads every per-channel feature to the location length, so the rows
-        kept by `channel_points` (non-NaN location) index the feature identically.
+        The feature is padded to the global location length and masked by the same
+        `channel_valid_mask` used by `channel_points`, so the returned rows index the
+        channel's points identically.
 
         Args:
             channel: The buffer input channel to read.
@@ -654,23 +826,61 @@ class ChannelView:
         channel_feats = self.lm.buffer.features.get(channel)
         if not channel_feats or attr not in channel_feats:
             return None
-        arr = np.asarray(channel_feats[attr], dtype=float)
-        locations = np.asarray(self.lm.buffer.locations[channel])
-        if arr.ndim != 2 or arr.shape[0] != locations.shape[0]:
+        mask = self.channel_valid_mask(channel)
+        if mask is None:
             return None
-        valid = arr[~np.isnan(locations[:, 0])]
+        arr = self.lm.buffer._pad_to_target_length(
+            np.asarray(channel_feats[attr], dtype=float)
+        )
+        if arr.ndim != 2 or arr.shape[0] != mask.shape[0]:
+            return None
+        valid = arr[mask]
         if valid.size == 0 or np.isnan(valid).any():
             return None
         return valid
+
+    def model_graph(self, channel: str, graph_id: str) -> GraphObjectModel | None:
+        """Return the source LM's model of a child object, for an LM input channel.
+
+        This is the sending LM's graph of the object, in the child's own reference
+        frame, which is the frame `location_rel_model` is expressed in. The source LM
+        keeps one graph per object for each of its input channels, all in that same
+        frame, so a sensor-module channel's graph is preferred for its sensed features
+        (e.g. hsv), otherwise the first channel is used.
+
+        Args:
+            channel: The learning-module channel whose source LM holds the model.
+            graph_id: The object model to read.
+
+        Returns:
+            The object model, or `None` when the source LM, graph, or its node
+            locations are unavailable.
+        """
+        source_lm = self.resolve_lm_channel(channel)
+        if not isinstance(source_lm, EvidenceGraphLM):
+            return None
+        if graph_id not in source_lm.graph_memory.get_memory_ids():
+            return None
+        graph_channels = source_lm.get_input_channels_in_graph(graph_id)
+        if not graph_channels:
+            return None
+        sender_types = source_lm.buffer.channel_sender_types
+        sm_channels = [c for c in graph_channels if sender_types.get(c) == "SM"]
+        graph_channel = sm_channels[0] if sm_channels else graph_channels[0]
+        graph = source_lm.graph_memory.get_graph(graph_id, graph_channel)
+        pos = getattr(graph, "pos", None)
+        if pos is None or len(pos) == 0:
+            return None
+        return graph
 
     def object_id_names(self, channel: str) -> dict[int, str]:
         """Map an LM channel's numeric object ids back to their object names.
 
         A learning-module channel carries each point's object as a numeric `object_id`
         feature (a hash of the object name). The source learning module knows the names
-        of the objects it has learned, so re-hashing each known name inverts the feature
-        and recovers the human-readable name shown in the legend, matching the text in
-        the "Input Feature" inset.
+        of the objects it has learned, so re-hashing each known name with the LM's own
+        `_object_id_to_features` inverts the feature and recovers the human-readable
+        name shown in the legend, matching the text in the "Input Feature" inset.
 
         Args:
             channel: The buffer input channel being colored.
@@ -683,7 +893,7 @@ class ChannelView:
         if not isinstance(source_lm, EvidenceGraphLM):
             return {}
         return {
-            sum(ord(c) for c in graph_id): graph_id
+            source_lm._object_id_to_features(graph_id): graph_id
             for graph_id in source_lm.graph_memory.get_memory_ids()
         }
 
@@ -735,8 +945,8 @@ class FeatureInset:
 
     `draw` renders the selected channel's live feature into the inset, reading the
     channel resolution from a `ChannelView`: a 2D sensor module's detected edge, a 3D
-    sensor module's local surface and normal, or the name of the object passed on a
-    learning-module channel.
+    sensor module's local surface and normal, or the object model received on a
+    learning-module channel with the sensed location on it (if available).
     """
 
     def __init__(self, fig: Figure, channel_view: ChannelView) -> None:
@@ -749,7 +959,6 @@ class FeatureInset:
         self.fig = fig
         self.channel_view = channel_view
         self.ax: Axes | None = None
-        self.projection: str | None = None
         self._border = None
         self._title = None
         self._rect: tuple[float, ...] | None = None
@@ -765,16 +974,17 @@ class FeatureInset:
             The inset axis.
         """
         self._ensure_frame(rect)
-        mpl_projection = "3d" if projection == "3d" else None
-        current_mpl = "3d" if self.projection == "3d" else None
-        if self.ax is not None and current_mpl == mpl_projection:
+        want_3d = projection == "3d"
+        if self.ax is not None and (
+            projection == "text" or (self.ax.name == "3d") == want_3d
+        ):
             self.ax.set_position(rect)
-            self.projection = projection
             return self.ax
         if self.ax is not None:
-            self.ax.remove()
-        self.ax = self.fig.add_axes(rect, projection=mpl_projection, zorder=10)
-        self.projection = projection
+            remove_axes(self.ax)
+        self.ax = self.fig.add_axes(
+            rect, projection="3d" if want_3d else None, zorder=10
+        )
         return self.ax
 
     def _ensure_frame(self, rect: list[float]) -> None:
@@ -815,6 +1025,23 @@ class FeatureInset:
             self._title.set_position((left + width / 2, bottom + height + 0.005))
         self._rect = tuple(rect)
 
+    def _set_status(self, *, used: bool | None) -> None:
+        """Mark whether the receiving LM used the drawn input.
+
+        Args:
+            used: `True` for a green "used" frame, `False` for a red "dropped" frame,
+                or `None` for the plain frame when no input is drawn.
+        """
+        if used is None:
+            color, width, title = "black", 1.0, "Input Feature"
+        elif used:
+            color, width, title = "tab:green", 2.5, "Input Feature (used)"
+        else:
+            color, width, title = "tab:red", 2.5, "Input Feature (dropped)"
+        self._border.set_edgecolor(color)
+        self._border.set_linewidth(width)
+        self._title.set_text(title)
+
     def clear(self) -> Axes:
         """Clear the inset to a transparent, axis-off surface.
 
@@ -828,18 +1055,23 @@ class FeatureInset:
 
     def remove(self) -> None:
         """Remove the inset axis, border, and title from the figure."""
-        for artist in (self.ax, self._border, self._title):
+        if self.ax is not None:
+            remove_axes(self.ax)
+        for artist in (self._border, self._title):
             if artist is not None:
                 artist.remove()
         self.ax = self._border = self._title = None
-        self.projection = self._rect = None
+        self._rect = None
 
     def draw(self, channel: str | None, rect: list[float]) -> None:
         """Draw one channel's live input feature into the inset.
 
-        The content depends on the channel's source: a 2D sensor module draws its
-        detected edge, a 3D sensor module draws its local surface and normal, and a
-        learning-module channel shows the name of the object currently being passed.
+        Draws the message routed to the displayed LM on the channel this step, or "no
+        input" when nothing arrived. The content depends on the channel's source: a 2D
+        sensor module draws its detected edge, a 3D sensor module draws its local
+        surface and normal, and a learning-module channel shows the received object
+        model and location. The frame is green ("used") when the LM processed the
+        input's features and red ("dropped") when it did not.
 
         Args:
             channel: The channel whose live feature is drawn.
@@ -850,17 +1082,24 @@ class FeatureInset:
             if channel is not None
             else None
         )
-        if sender_type == "SM":
-            sm = self.channel_view.resolve_sm_channel(channel)
-            self._draw_from_sm(rect, sm)
-        elif channel is not None and sender_type == "LM":
-            self._draw_lm_name(rect, channel)
-        else:
+        message, used = self.channel_view.received_message(channel)
+        if sender_type not in {"SM", "LM"}:
             self.ensure("text", rect)
             self._draw_message("no channel")
+        elif message is None:
+            self.ensure("text", rect)
+            self._draw_message("no input")
+        elif sender_type == "SM":
+            sm = self.channel_view.resolve_sm_channel(channel)
+            self._draw_from_sm(rect, sm, message)
+        else:
+            self._draw_from_lm(rect, channel, message)
+        self._set_status(used=None if message is None else used)
 
-    def _draw_from_sm(self, rect: list[float], sm: SensorModule | None) -> None:
-        """Draw a sensor module's detected feature, colored by the sensed hsv.
+    def _draw_from_sm(
+        self, rect: list[float], sm: SensorModule | None, message: Message
+    ) -> None:
+        """Draw a sensor module's received feature, colored by the sensed hsv.
 
         For a 3D sensor module the inset is a small 3D axis showing the local surface as
         a tilted square plane with an arrow along its outward normal. For a 2D sensor
@@ -871,18 +1110,12 @@ class FeatureInset:
         Args:
             rect: The `[left, bottom, width, height]` inset rectangle.
             sm: The sensor module feeding the channel.
+            message: The sensor module's message received this step.
         """
         is_2d = isinstance(sm, TwoDSensorModule)
         self.ensure("2d" if is_2d else "3d", rect)
-        processed = sm.processed_obs if sm is not None else []
-        if not processed:
-            self._draw_message("no pose")
-            return
-        obs = processed[-1]
-        morph, non_morph = (
-            obs["morphological_features"],
-            obs["non_morphological_features"],
-        )
+        morph = message.morphological_features
+        non_morph = message.non_morphological_features
         pose_vectors = morph.get("pose_vectors")
         if pose_vectors is None:
             self._draw_message("off object")
@@ -904,23 +1137,45 @@ class FeatureInset:
             rotation = sm.state.rotation if sm.state is not None else None
             self._draw_surface(pose_vectors, color, rotation)
 
-    def _draw_lm_name(self, rect: list[float], channel: str) -> None:
-        """Show the name of the object being passed on a learning-module channel.
+    def _draw_from_lm(self, rect: list[float], channel: str, message: Message) -> None:
+        """Draw the object model received on a learning-module channel.
+
+        The object is decoded from the received message's `object_id`. The source LM's
+        model of that object is drawn in its own reference frame, with the received
+        `location_rel_model` marked on it when the message carries one. The marker is
+        always the `"match"` color, since an LM only passes its output up from the
+        `"match"` terminal state. Falls back to the object name when the model is not
+        available.
 
         Args:
             rect: The `[left, bottom, width, height]` inset rectangle.
             channel: The learning-module channel.
+            message: The source LM's message received this step.
         """
-        self.ensure("text", rect)
-        ax = self.clear()
-        source_lm = self.channel_view.resolve_lm_channel(channel)
-        name = "-"
-        if source_lm is not None:
-            mlh = source_lm._get_current_mlh()
-            graph_id = mlh.get("graph_id") if mlh else None
-            if graph_id and graph_id != "no_observations_yet":
-                name = str(graph_id)
-        ax.text(0.5, 0.5, name, ha="center", va="center", transform=ax.transAxes)
+
+        features = message.non_morphological_features
+        object_id = int(features["object_id"])
+        names = self.channel_view.object_id_names(channel)
+        name = names.get(object_id, f"object {object_id}")
+        graph = self.channel_view.model_graph(channel, name)
+        if graph is None:
+            self.ensure("text", rect)
+            self._draw_message(name)
+            return
+
+        location = features.get("location_rel_model")
+        marker_color = terminal_state_color("match")
+        if is_3d(np.asarray(graph.pos)):
+            self.ensure("3d", rect)
+            ax = self.clear()
+            draw_graph_3d(ax, graph, location, marker_color)
+            ax.view_init(elev=30, azim=-60)
+            ax.text2D(0.5, 0.02, name, ha="center", fontsize=7, transform=ax.transAxes)
+        else:
+            self.ensure("2d", rect)
+            ax = self.clear()
+            draw_graph_2d(ax, graph, location, marker_color)
+            ax.text(0.5, 0.02, name, ha="center", fontsize=7, transform=ax.transAxes)
 
     def _draw_message(self, message: str) -> None:
         """Clear the inset and show a centered message.
@@ -929,7 +1184,7 @@ class FeatureInset:
             message: The text to display (e.g. "off object").
         """
         ax = self.clear()
-        text = ax.text2D if self.projection == "3d" else ax.text
+        text = ax.text2D if ax.name == "3d" else ax.text
         text(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes)
 
     def _draw_surface(

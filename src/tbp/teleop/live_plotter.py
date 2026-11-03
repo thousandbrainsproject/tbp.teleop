@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-import numpy as np
 from tbp.monty.frameworks.experiments.mode import ExperimentMode
 from tbp.monty.frameworks.models.no_reset_evidence_matching import (
     MontyForNoResetEvidenceGraphMatching,
@@ -338,16 +337,17 @@ class LivePlotter(Plotter):
         """Draw the exploratory-step panels from the LM buffer.
 
         The Monty panel shows the selected channel's buffered points; the Details panel
-        stacks one plot group per other channel. While the graph is still being built we
-        cannot tell whether the points are planar, so every buffer view is drawn in 3D
-        with three head-on 2D projections beneath it. Falls back to a placeholder when
-        there are no observations yet.
+        stacks one plot group per other channel. The buffer stores a single global
+        location per step (the mean of the sensor module locations), so every channel's
+        cloud is drawn on those shared coordinates, masked to the steps that channel was
+        active; learning-module channels therefore sit on the sensor-mean locations
+        rather than their own object-frame coordinates. While the graph is still being
+        built we cannot tell whether the points are planar, so every buffer view is
+        drawn in 3D with three head-on 2D projections beneath it. Falls back to a
+        placeholder when there are no observations yet.
         """
-        locations = self._channel_view.lm.buffer.locations
-        points = {
-            c: self._channel_view.channel_points(np.asarray(locs))
-            for c, locs in locations.items()
-        }
+        buffer_channels = self._channel_view.lm_channels()
+        points = {c: self._channel_view.channel_points(c) for c in buffer_channels}
         channels = [c for c in points if points[c].size]
         if not channels:
             self._monty.draw_placeholder("no observations yet")
