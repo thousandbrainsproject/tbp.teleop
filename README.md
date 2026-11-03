@@ -44,7 +44,7 @@ Either activate the environment (`source .venv/bin/activate`) or prefix commands
 To run tbp.teleop with config files in your working tbp.monty checkout, run:
 
 ```bash
-uv run python run.py experiment=example
+uv run python run.py experiment=your_experiment_name
 ```
 
 For example:
@@ -53,13 +53,19 @@ For example:
 uv run python run.py experiment=supervised_pre_training_cows_small_compositional
 ```
 
+although with the above example, you will want to introduce the hooks discussed below.
+
 Note that the `src/tbp/teleop/conf` directory is added to Hydra's config search path
 automatically by a Hydra plugin (`src/hydra_plugins`). This contains the hook configs (see below),
-and can also be used to define your own experiments locally under `src/tbp/teleop/conf/experiment`.
+and can also be used to define your own experiments locally under `src/tbp/teleop/conf/experiment`. For example:
+
+```bash
+uv run python run.py experiment=example
+```
 
 ## Live Plotter
 
-The live plotter visualizes an experiment in real-time. It is attached to an
+The main purpose of tbp.teelop is to provide a live plotter which visualizes an experiment in real-time. It is attached to an
 experiment as a Monty step hook. Two hooks are provided as a Hydra `hooks` config
 group under `src/tbp/teleop/conf/hooks`:
 
@@ -78,21 +84,26 @@ defaults:
 ```
 
 Or select one at run time as an inline override. Use `+hooks=` to add the hook
-when the experiment does not already list one in its `defaults`:
+when the experiment does not already list one in its `defaults`, such as an experiment
+from your `tbp.monty` checkout:
 
 ```bash
-uv run python run.py experiment=example +hooks=interactive
+uv run python run.py experiment=supervised_pre_training_cows_small_compositional +hooks=interactive
 # OR
-uv run python run.py experiment=example +hooks=monitor
+uv run python run.py experiment=supervised_pre_training_cows_small_compositional +hooks=monitor
 ```
 
 If the experiment already includes a hook in its `defaults` list, drop the `+` to
-swap it instead (for example, `hooks=interactive`).
+swap it instead. The local `example` experiment lists `/hooks: monitor`, so use:
+
+```bash
+uv run python run.py experiment=example hooks=interactive
+```
 
 You can also append config overrides as required, for example:
 
 ```bash
-uv run python run.py experiment=example +hooks=interactive logging=basic_warning_monty_runs
+uv run python run.py experiment=example hooks=interactive logging=basic_warning_monty_runs
 ```
 
 to run with `logging=basic_warning_monty_runs` rather than defaults which may use Wandb.
