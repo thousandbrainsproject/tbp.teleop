@@ -255,7 +255,7 @@ class MontyPanel:
         """
         lm = self.channel_view.lm
         graph = None
-        mlh = lm.get_current_mlh()
+        mlh = lm._get_current_mlh()
         if mlh and mlh.get("graph_id") not in (None, "no_observations_yet"):
             graph_id = mlh["graph_id"]
             if graph_id in lm.graph_memory.get_memory_ids():

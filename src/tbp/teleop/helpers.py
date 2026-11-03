@@ -417,7 +417,7 @@ class EvidenceHistory:
             lm: The learning module whose current state is recorded.
             step: The index of the current step within the episode.
         """
-        mlh = lm.get_current_mlh()
+        mlh = lm._get_current_mlh()
         if not mlh or mlh.get("graph_id") == "no_observations_yet":
             return
 
@@ -887,7 +887,9 @@ class FeatureInset:
         if pose_vectors is None:
             self._draw_message("off object")
             return
-        pose_vectors = np.asarray(pose_vectors)
+        # Monty wraps pose vectors in `SurfacePoseVectors`, `OrientationMatrix` or
+        # `GazeDirection`; each holds the `(3, 3)` array in `.value`.
+        pose_vectors = np.asarray(getattr(pose_vectors, "value", pose_vectors))
 
         hsv = non_morph.get("hsv")
         if hsv is not None:
@@ -914,7 +916,7 @@ class FeatureInset:
         source_lm = self.channel_view.resolve_lm_channel(channel)
         name = "-"
         if source_lm is not None:
-            mlh = source_lm.get_current_mlh()
+            mlh = source_lm._get_current_mlh()
             graph_id = mlh.get("graph_id") if mlh else None
             if graph_id and graph_id != "no_observations_yet":
                 name = str(graph_id)
