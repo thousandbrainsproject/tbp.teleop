@@ -1152,7 +1152,6 @@ class FeatureInset:
             channel: The learning-module channel.
             message: The source LM's message received this step.
         """
-
         features = message.non_morphological_features
         object_id = int(features["object_id"])
         names = self.channel_view.object_id_names(channel)

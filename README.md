@@ -65,7 +65,7 @@ uv run python run.py experiment=example
 
 ## Live Plotter
 
-The main purpose of tbp.teelop is to provide a live plotter which visualizes an experiment in real-time. It is attached to an
+The main purpose of tbp.teleop is to provide a live plotter which visualizes an experiment in real-time. It is attached to an
 experiment as a Monty step hook. Two hooks are provided as a Hydra `hooks` config
 group under `src/tbp/teleop/conf/hooks`:
 
