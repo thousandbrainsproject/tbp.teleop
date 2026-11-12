@@ -12,72 +12,60 @@ Visualize and teleoperate a [tbp.monty](https://github.com/thousandbrainsproject
 
 ## Installation
 
-The environment for this project is managed with [conda](https://www.anaconda.com/download/success).
+The environment for this project is managed with [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 ### Prerequisites
 
-This project is a tool for [tbp.monty](https://github.com/thousandbrainsproject/tbp.monty). It expects `tbp.monty` to be installed at `../tbp.monty`. If your `tbp.monty` installation is not there, you can update the `environment[_arm64].yaml` file to install from the correct location:
+This project is a tool for [tbp.monty](https://github.com/thousandbrainsproject/tbp.monty). It expects `tbp.monty` to be checked out at `../tbp.monty`. If your `tbp.monty` checkout is somewhere else, update the path in `pyproject.toml`:
 
-```yaml
-  # ...
-  - pip:
-      - eval-type-backport>=0.3.1
-      - opencv-python==4.13.0.92
-      - omegaconf>=2.3.0
-      - pydantic>=2.10.6
-      - typing-extensions
-      - -e ../tbp.monty # <-- point to where you have tbp.monty installed
-      - -e .[dev]
+```toml
+[tool.uv.sources]
+"tbp.monty" = { path = "../tbp.monty", editable = true } # <-- point to where you have tbp.monty
 ```
 
-To create the environment, run:
+### Create the environment
 
-### ARM64 (Apple Silicon) (zsh shell)
-```
-conda env create -f environment_arm64.yml --subdir=osx-64
-conda init zsh
-conda activate tbp.teleop
-conda config --env --set subdir osx-64
+From the root of this repository, run:
+
+```bash
+uv sync --extra dev --extra gui --extra simulator_mujoco
 ```
 
-### ARM64 (Apple Silicon) (bash shell)
-```
-conda env create -f environment_arm64.yml --subdir=osx-64
-conda init
-conda activate tbp.teleop
-conda config --env --set subdir osx-64
-```
+This creates a `.venv` with a Python version satisfying `requires-python` (3.13 or newer) and installs the locked dependencies from `uv.lock`. The extras are:
 
-### Intel (zsh shell)
-```
-conda env create -f environment.yml
-conda init zsh
-conda activate tbp.teleop
-```
+- `dev` — formatter, linter, type checker, and test dependencies.
+- `gui` — PyQt5, the interactive GUI backend (QtAgg) required by the live plotter.
+- `simulator_mujoco` — the MuJoCo simulator used by Monty.
 
-### Intel (bash shell)
-```
-conda env create -f environment.yml
-conda init
-conda activate tbp.teleop
-```
+Either activate the environment (`source .venv/bin/activate`) or prefix commands with `uv run`.
 
 ## Experiments
 
-Define your experiments in the `src/tbp/teleop/conf/experiment` directory.
-You'll need to pass the `src/tbp/teleop/conf` path as part of your run command
-via the Hydra `-cd src/tbp/teleop/conf` option.
-
-After installing the environment, to run an experiment, run:
+To run tbp.teleop with config files in your working tbp.monty checkout, run:
 
 ```bash
-python run.py -cd src/tbp/teleop/conf experiment=example
+uv run python run.py experiment=your_experiment_name
 ```
 
+For example:
+
+```bash
+uv run python run.py experiment=supervised_pre_training_cows_small_compositional
+```
+
+although with the above example, you will want to introduce the hooks discussed below.
+
+Note that the `src/tbp/teleop/conf` directory is added to Hydra's config search path
+automatically by a Hydra plugin (`src/hydra_plugins`). This contains the hook configs (see below),
+and can also be used to define your own experiments locally under `src/tbp/teleop/conf/experiment`. For example:
+
+```bash
+uv run python run.py experiment=example
+```
 
 ## Live Plotter
 
-The live plotter visualizes an experiment in real-time. It is attached to an
+The main purpose of tbp.teleop is to provide a live plotter which visualizes an experiment in real-time. It is attached to an
 experiment as a Monty step hook. Two hooks are provided as a Hydra `hooks` config
 group under `src/tbp/teleop/conf/hooks`:
 
@@ -96,20 +84,33 @@ defaults:
 ```
 
 Or select one at run time as an inline override. Use `+hooks=` to add the hook
-when the experiment does not already list one in its `defaults`:
+when the experiment does not already list one in its `defaults`, such as an experiment
+from your `tbp.monty` checkout:
 
 ```bash
-python run.py -cd src/tbp/teleop/conf experiment=example +hooks=interactive
+uv run python run.py experiment=supervised_pre_training_cows_small_compositional +hooks=interactive
 # OR
-python run.py -cd src/tbp/teleop/conf experiment=example +hooks=monitor
+uv run python run.py experiment=supervised_pre_training_cows_small_compositional +hooks=monitor
 ```
 
 If the experiment already includes a hook in its `defaults` list, drop the `+` to
-swap it instead (for example, `hooks=interactive`).
+swap it instead. The local `example` experiment lists `/hooks: monitor`, so use:
+
+```bash
+uv run python run.py experiment=example hooks=interactive
+```
+
+You can also append config overrides as required, for example:
+
+```bash
+uv run python run.py experiment=example hooks=interactive logging=basic_warning_monty_runs
+```
+
+to run with `logging=basic_warning_monty_runs` rather than defaults which may use Wandb.
 
 ## Development
 
-After installing the environment, you can run the following commands to check your code.
+After installing the environment, you can run the following commands to check your code. Prefix them with `uv run` if the environment is not activated.
 
 ### Run formatter
 

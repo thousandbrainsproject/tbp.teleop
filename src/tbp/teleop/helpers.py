@@ -40,6 +40,16 @@ if TYPE_CHECKING:
     )
     from tbp.monty.frameworks.models.object_model import GraphObjectModel
 
+try:  # matplotlib >= 3.9; `rcsetup.interactive_bk` was removed in 3.11
+    from matplotlib.backends import BackendFilter, backend_registry
+
+    _INTERACTIVE_BACKENDS = {
+        backend.lower()
+        for backend in backend_registry.list_builtin(BackendFilter.INTERACTIVE)
+    }
+except ImportError:  # matplotlib < 3.9
+    _INTERACTIVE_BACKENDS = {backend.lower() for backend in mpl.rcsetup.interactive_bk}
+
 
 def is_interactive_backend() -> bool:
     """Whether the active matplotlib backend can run a blocking event loop.
@@ -47,7 +57,7 @@ def is_interactive_backend() -> bool:
     Returns:
         True if the current backend is an interactive (GUI) backend.
     """
-    return mpl.get_backend() in mpl.rcsetup.interactive_bk
+    return mpl.get_backend().lower() in _INTERACTIVE_BACKENDS
 
 
 def remove_axes(ax: Axes) -> None:
@@ -1110,7 +1120,9 @@ class FeatureInset:
         if pose_vectors is None:
             self._draw_message("off object")
             return
-        pose_vectors = np.asarray(pose_vectors)
+        # Monty wraps pose vectors in `SurfacePoseVectors`, `OrientationMatrix` or
+        # `GazeDirection`; each holds the `(3, 3)` array in `.value`.
+        pose_vectors = np.asarray(getattr(pose_vectors, "value", pose_vectors))
 
         hsv = non_morph.get("hsv")
         if hsv is not None:

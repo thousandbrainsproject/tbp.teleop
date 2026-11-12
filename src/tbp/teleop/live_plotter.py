@@ -79,6 +79,7 @@ class LivePlotter(Plotter):
     _history: EvidenceHistory
     _last_observations: Observations | None
     _last_step: int | None
+    _total_steps: int
     _supervised_lm_ids: list[str]
 
     def __init__(
@@ -171,6 +172,7 @@ class LivePlotter(Plotter):
         self._history = EvidenceHistory()
         self._last_observations = None
         self._last_step = None
+        self._total_steps = 0
         self._supervised_lm_ids = supervised_lm_ids
 
         self._build_figure()
@@ -244,8 +246,9 @@ class LivePlotter(Plotter):
         prev_step = self._last_step
         self._last_observations = observations
         self._last_step = step
+        self._total_steps += 1
         if self._is_continual(self.model):
-            history_step = self.model.total_steps
+            history_step = self._total_steps
         else:
             if prev_step is None or step <= prev_step:
                 self._history.clear()

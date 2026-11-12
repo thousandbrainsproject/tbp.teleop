@@ -91,3 +91,6 @@ outputs/
 
 # symlinks
 src/tbp/monty/
+
+# simulator logs
+MUJOCO_LOG.TXT
